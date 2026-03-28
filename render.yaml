@@ -4,8 +4,8 @@ services:
     runtime: node
     plan: free
     branch: main
-    buildCommand: npm install
-    startCommand: npm start
+    buildCommand: npm install -g pnpm@9 && pnpm install && pnpm build
+    startCommand: pnpm start
     envVars:
       - key: NODE_ENV
         value: production
@@ -16,4 +16,4 @@ services:
       - key: AUTH_PASS
         value: changeme123
       - key: API_KEY
-        value: auto-generated-key-123
+        value: mc-api-key-123456789
