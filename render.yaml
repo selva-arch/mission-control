@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: mission-control
+    runtime: node
+    plan: free
+    branch: main
+    buildCommand: npm install -g pnpm && pnpm install && pnpm build
+    startCommand: pnpm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: AUTH_USER
+        value: admin
+      - key: AUTH_PASS
+        value: changeme123
+      - key: API_KEY
+        value: auto-generated-key-123
