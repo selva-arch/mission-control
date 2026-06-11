@@ -18,7 +18,13 @@ keywords:
 
 # How many times to scroll each result page to lazy-load more ads.
 # ~10 pulls in a few hundred ads per keyword; raise for deeper sweeps.
-max_scrolls: 12
+max_scrolls: 25
+
+# Which ads to include:
+#   active   = only ads running right now
+#   all      = active + inactive/expired (lets you see historical price points)
+#   inactive = only expired ads
+active_status: all
 
 # Run a real browser window so you can log into Facebook the first time.
 # After first login the session is reused from ./.fb-profile (gitignored).

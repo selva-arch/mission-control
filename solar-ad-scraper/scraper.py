@@ -27,16 +27,19 @@ PROFILE_DIR = Path(__file__).parent / ".fb-profile"
 
 AD_LIBRARY_URL = (
     "https://www.facebook.com/ads/library/"
-    "?active_status=active&ad_type=all&country={country}"
+    "?active_status={active_status}&ad_type=all&country={country}"
     "&q={query}&media_type=all"
 )
 
 
-def _search_url(keyword: str, country: str) -> str:
-    return AD_LIBRARY_URL.format(country=country, query=quote(keyword))
+def _search_url(keyword: str, country: str, active_status: str) -> str:
+    return AD_LIBRARY_URL.format(
+        country=country, query=quote(keyword), active_status=active_status
+    )
 
 
-def search(keyword: str, country: str, max_scrolls: int, headless: bool) -> list[bytes]:
+def search(keyword: str, country: str, max_scrolls: int, headless: bool,
+           active_status: str = "active") -> list[bytes]:
     """Run one Ad Library search and return the raw GraphQL response bodies.
 
     Returns a list of response-body strings (JSON, possibly newline-delimited
@@ -67,7 +70,8 @@ def search(keyword: str, country: str, max_scrolls: int, headless: bool) -> list
 
         page.on("response", on_response)
 
-        page.goto(_search_url(keyword, country), wait_until="domcontentloaded")
+        page.goto(_search_url(keyword, country, active_status),
+                  wait_until="domcontentloaded")
 
         # First run: give the user time to log in if redirected to a login wall.
         if "login" in page.url or "checkpoint" in page.url:

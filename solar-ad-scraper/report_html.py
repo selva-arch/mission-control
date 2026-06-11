@@ -42,6 +42,8 @@ def load_rows(csv_path: Path) -> list[dict]:
             "pre_rebate": to_num(r.get("price_if_pre_rebate")),
             "days": to_num(r.get("days_running")),
             "copies": to_num(r.get("copies_running")),
+            "status": r.get("status", ""),
+            "ended": r.get("ended", ""),
             "flag": r.get("flag", ""),
             "landing": r.get("landing_url", ""),
             "library": r.get("library_url", ""),
@@ -100,6 +102,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <label>Max $/kWh <input type="number" id="maxPerKwh" placeholder="any"></label>
   <label>Min days live <input type="number" id="minDays" placeholder="any"></label>
   <label>Search advertiser <input type="text" id="search" placeholder="name..."></label>
+  <label>Status
+    <select id="status" style="padding:5px 7px;border:1px solid var(--line);border-radius:6px;font-size:13px;">
+      <option value="">All</option>
+      <option value="Active">Active only</option>
+      <option value="Ended">Ended only</option>
+    </select>
+  </label>
   <label class="chk"><input type="checkbox" id="pricedOnly" checked> Priced only</label>
   <label class="chk"><input type="checkbox" id="hideFlagged" checked> Hide bad parses</label>
   <button id="reset">Reset</button>
@@ -126,7 +135,9 @@ const COLS = [
   {key:"per_kwh",    label:"$/kWh",      num:true},
   {key:"rebate",     label:"Est rebate", num:true},
   {key:"pre_rebate", label:"If pre-rebate", num:true},
-  {key:"days",       label:"Days live",  num:true},
+  {key:"days",       label:"Days run",   num:true},
+  {key:"status",     label:"Status",     num:false},
+  {key:"ended",      label:"Ended",      num:false},
   {key:"copies",     label:"Copies",     num:true},
   {key:"flag",       label:"Flag",       num:false},
   {key:"links",      label:"Links",      num:false},
@@ -153,9 +164,11 @@ function filtered(){
   const minKwh=parseFloat(minKwhEl.value), maxKwh=parseFloat(maxKwhEl.value);
   const maxPK=parseFloat(maxPerKwhEl.value), minD=parseFloat(minDaysEl.value);
   const q=searchEl.value.trim().toLowerCase();
+  const st=statusEl.value;
   return DATA.filter(r=>{
     if(pricedOnlyEl.checked && (r.per_kwh==null)) return false;
     if(hideFlaggedEl.checked && r.flag) return false;
+    if(st && r.status!==st) return false;
     if(!isNaN(minKwh) && (r.kwh==null || r.kwh<minKwh)) return false;
     if(!isNaN(maxKwh) && (r.kwh==null || r.kwh>maxKwh)) return false;
     if(!isNaN(maxPK) && (r.per_kwh==null || r.per_kwh>maxPK)) return false;
@@ -201,14 +214,15 @@ function render(){
 
 const minKwhEl=document.getElementById("minKwh"), maxKwhEl=document.getElementById("maxKwh"),
   maxPerKwhEl=document.getElementById("maxPerKwh"), minDaysEl=document.getElementById("minDays"),
-  searchEl=document.getElementById("search"), pricedOnlyEl=document.getElementById("pricedOnly"),
+  searchEl=document.getElementById("search"), statusEl=document.getElementById("status"),
+  pricedOnlyEl=document.getElementById("pricedOnly"),
   hideFlaggedEl=document.getElementById("hideFlagged"), countEl=document.getElementById("count");
-[minKwhEl,maxKwhEl,maxPerKwhEl,minDaysEl,searchEl,pricedOnlyEl,hideFlaggedEl].forEach(el=>{
+[minKwhEl,maxKwhEl,maxPerKwhEl,minDaysEl,searchEl,statusEl,pricedOnlyEl,hideFlaggedEl].forEach(el=>{
   el.addEventListener("input", render);
 });
 document.getElementById("reset").onclick=()=>{
   [minKwhEl,maxKwhEl,maxPerKwhEl,minDaysEl,searchEl].forEach(el=>el.value="");
-  pricedOnlyEl.checked=true; hideFlaggedEl.checked=true; sortKey="per_kwh"; sortAsc=true; render();
+  statusEl.value=""; pricedOnlyEl.checked=true; hideFlaggedEl.checked=true; sortKey="per_kwh"; sortAsc=true; render();
 };
 render();
 </script>

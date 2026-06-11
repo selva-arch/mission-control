@@ -71,6 +71,7 @@ def main() -> int:
                 kw, country,
                 max_scrolls=cfg.get("max_scrolls", 12),
                 headless=cfg.get("headless", False),
+                active_status=cfg.get("active_status", "active"),
             )
         except Exception as e:
             print(f"  ! scrape failed for {kw!r}: {e}")
@@ -116,6 +117,8 @@ def main() -> int:
             "est_rebate_aud": cmp.est_rebate or "",
             "price_if_pre_rebate": cmp.price_if_pre_rebate or "",
             "deal_score": score if score != float("inf") else "",
+            "status": ad.status,
+            "ended": ad.end_date.date().isoformat() if ad.end_date else "",
             "days_running": ad.days_running if ad.days_running is not None else "",
             "copies_running": ad.collation_count or "",
             "all_prices_found": ",".join(str(p) for p in prices),

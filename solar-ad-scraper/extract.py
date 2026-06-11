@@ -20,6 +20,7 @@ class Ad:
     link_url: str = ""
     image_urls: list[str] = field(default_factory=list)
     start_date: datetime | None = None
+    end_date: datetime | None = None
     is_active: bool | None = None
     collation_count: int | None = None  # how many near-identical copies are running
     ocr_text: str = ""
@@ -29,10 +30,22 @@ class Ad:
         return f"https://www.facebook.com/ads/library/?id={self.ad_archive_id}"
 
     @property
+    def status(self) -> str:
+        if self.is_active is True:
+            return "Active"
+        if self.is_active is False:
+            return "Ended"
+        return ""
+
+    @property
     def days_running(self) -> int | None:
+        """How long the ad ran. For ended ads, start->end; for live ads,
+        start->now (i.e. how long it has been running so far)."""
         if not self.start_date:
             return None
-        return (datetime.now(timezone.utc) - self.start_date).days
+        end = self.end_date if (self.is_active is False and self.end_date) else \
+            datetime.now(timezone.utc)
+        return max(0, (end - self.start_date).days)
 
     @property
     def all_text(self) -> str:
@@ -152,6 +165,10 @@ def parse_ad_nodes(bodies: list[str]) -> dict[str, Ad]:
                 if ad.start_date is None:
                     ad.start_date = _epoch_to_dt(
                         _first(node, "start_date", "startDate", "ad_delivery_start_time")
+                    )
+                if ad.end_date is None:
+                    ad.end_date = _epoch_to_dt(
+                        _first(node, "end_date", "endDate", "ad_delivery_stop_time")
                     )
                 if ad.is_active is None:
                     ad.is_active = _first(node, "is_active", "isActive")
