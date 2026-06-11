@@ -87,20 +87,32 @@ def main() -> int:
     rows = []
     for ad in all_ads.values():
         if cfg.get("ocr_enabled", True) and ad.image_urls:
-            local = download_image(ad.image_urls[0], img_dir)
-            if local:
-                ad.ocr_text = extract.ocr_image(str(local))
+            # OCR every creative (capped), not just the first — the price often
+            # sits on a later card, while the first image is a lifestyle shot.
+            texts = []
+            for url in ad.image_urls[: cfg.get("max_images_per_ad", 4)]:
+                local = download_image(url, img_dir)
+                if local:
+                    texts.append(extract.ocr_image(str(local)))
+            ad.ocr_text = "\n".join(t for t in texts if t)
 
         prices = extract.extract_prices(ad.all_text)
         caps = extract.extract_capacities(ad.all_text)
         cmp = normalize.compare(prices, caps, rebate)
         score = normalize.deal_score(cmp, ad.days_running)
 
+        # Real home batteries land roughly $150-$1500 / usable kWh installed.
+        # Anything outside that is almost certainly a bad price/capacity pairing.
+        flag = ""
+        if cmp.dollars_per_kwh and not (150 <= cmp.dollars_per_kwh <= 1500):
+            flag = "check-parse"
+
         rows.append({
             "page_name": ad.page_name,
             "price_aud": cmp.price or "",
             "capacity_kwh": cmp.capacity_kwh or "",
             "dollars_per_kwh": cmp.dollars_per_kwh or "",
+            "flag": flag,
             "est_rebate_aud": cmp.est_rebate or "",
             "price_if_pre_rebate": cmp.price_if_pre_rebate or "",
             "deal_score": score if score != float("inf") else "",
@@ -112,8 +124,9 @@ def main() -> int:
             "library_url": ad.library_url,
         })
 
-    # 3. Sort best-deal-first (lowest $/kWh-derived score), unknowns last.
-    rows.sort(key=lambda r: (r["deal_score"] == "", r["deal_score"] or 0))
+    # 3. Sort best-deal-first (lowest $/kWh-derived score). Suspect parses sink
+    #    below clean ones; ads with no usable price go last.
+    rows.sort(key=lambda r: (r["deal_score"] == "", r["flag"] != "", r["deal_score"] or 0))
 
     out = HERE / cfg.get("output", "out/solar-ads.csv")
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -123,7 +136,7 @@ def main() -> int:
         w.writerows(rows)
 
     print(f"[write] {len(rows)} rows -> {out}")
-    priced = [r for r in rows if r["dollars_per_kwh"]]
+    priced = [r for r in rows if r["dollars_per_kwh"] and not r["flag"]]
     if priced:
         print("\nTop 5 by $/usable kWh:")
         for r in priced[:5]:

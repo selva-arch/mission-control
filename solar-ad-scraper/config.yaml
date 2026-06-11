@@ -27,6 +27,10 @@ headless: false
 # Download ad creative images and OCR prices baked into the graphics.
 ocr_enabled: true
 
+# How many creatives per ad to OCR. The price often sits on a later card,
+# not the first (hero) image, so OCR a few. Higher = better yield, slower.
+max_images_per_ad: 4
+
 # Output CSV path
 output: out/solar-ads.csv
 
