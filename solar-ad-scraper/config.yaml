@@ -1,0 +1,42 @@
+# Solar Ad Scraper configuration
+
+# Meta Ad Library country code (AU = Australia)
+country: AU
+
+# Search terms. Each runs as a separate Ad Library query and results are merged
+# and de-duplicated by ad archive ID.
+keywords:
+  - solar battery
+  - home battery
+  - battery rebate
+  - Tesla Powerwall
+  - Sungrow battery
+  - Fox ESS battery
+  - Pylontech battery
+  - BYD battery
+  - Anker SOLIX
+
+# How many times to scroll each result page to lazy-load more ads.
+# ~10 pulls in a few hundred ads per keyword; raise for deeper sweeps.
+max_scrolls: 12
+
+# Run a real browser window so you can log into Facebook the first time.
+# After first login the session is reused from ./.fb-profile (gitignored).
+headless: false
+
+# Download ad creative images and OCR prices baked into the graphics.
+ocr_enabled: true
+
+# Output CSV path
+output: out/solar-ads.csv
+
+# Federal rebate model (Cheaper Home Batteries Program, from 1 May 2026).
+# Used to estimate the post-rebate price when an ad shows a pre-rebate figure.
+# STC value assumption (~$/STC after admin margin) and tiered factors.
+rebate:
+  dollars_per_kwh_tier1: 272   # first 14 kWh
+  dollars_per_kwh_tier2: 163   # 14-28 kWh
+  dollars_per_kwh_tier3: 41    # 28-50 kWh
+  tier1_cap: 14
+  tier2_cap: 28
+  tier3_cap: 50

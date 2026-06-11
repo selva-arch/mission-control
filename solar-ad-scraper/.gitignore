@@ -1,0 +1,12 @@
+# Logged-in browser session (contains your Facebook cookies — never commit)
+.fb-profile/
+
+# Downloaded ad creatives + generated reports
+out/
+images/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
