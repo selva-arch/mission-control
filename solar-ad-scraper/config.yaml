@@ -50,3 +50,21 @@ rebate:
   tier1_cap: 14
   tier2_cap: 28
   tier3_cap: 50
+
+# ---------------------------------------------------------------------------
+# Tariff + battery model (used by usage_model.py, not the scraper).
+# Clock hours (0-23) each time-of-use period covers. Defaults below match the
+# user's SA plan: Peak 6-10am & 4pm-midnight, Off-peak 12-6am, Shoulder 10am-4pm.
+# ---------------------------------------------------------------------------
+tariff:
+  supply_per_day: 0.78958
+  rates:
+    peak: 0.36410
+    shoulder: 0.17732
+    offpeak: 0.21329
+  hours:
+    peak: [6, 7, 8, 9, 16, 17, 18, 19, 20, 21, 22, 23]
+    offpeak: [0, 1, 2, 3, 4, 5]
+    shoulder: [10, 11, 12, 13, 14, 15]
+  round_trip_efficiency: 0.90
+  battery_sizes_usable: [10, 13.5, 16, 20, 27]

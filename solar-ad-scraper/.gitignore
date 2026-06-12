@@ -10,3 +10,8 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# Personal smart-meter exports — never commit
+*ELECTRICITY*.csv
+*electricity*.csv
+usage/
