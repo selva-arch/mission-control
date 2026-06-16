@@ -87,6 +87,8 @@ def main() -> int:
     img_dir = HERE / "images"
     rows = []
     for ad in all_ads.values():
+        image_file = ""
+        image_url = ad.image_urls[0] if ad.image_urls else ""
         if cfg.get("ocr_enabled", True) and ad.image_urls:
             # OCR every creative (capped), not just the first — the price often
             # sits on a later card, while the first image is a lifestyle shot.
@@ -94,6 +96,8 @@ def main() -> int:
             for url in ad.image_urls[: cfg.get("max_images_per_ad", 4)]:
                 local = download_image(url, img_dir)
                 if local:
+                    if not image_file:
+                        image_file = f"images/{local.name}"  # for the HTML gallery
                     texts.append(extract.ocr_image(str(local)))
             ad.ocr_text = "\n".join(t for t in texts if t)
 
@@ -123,6 +127,8 @@ def main() -> int:
             "copies_running": ad.collation_count or "",
             "all_prices_found": ",".join(str(p) for p in prices),
             "all_kwh_found": ",".join(str(c) for c in caps),
+            "image_file": image_file,
+            "image_url": image_url,
             "landing_url": ad.link_url,
             "library_url": ad.library_url,
         })

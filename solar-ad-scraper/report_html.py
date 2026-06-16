@@ -47,6 +47,11 @@ def load_rows(csv_path: Path) -> list[dict]:
             "flag": r.get("flag", ""),
             "landing": r.get("landing_url", ""),
             "library": r.get("library_url", ""),
+            # Prefer the locally downloaded creative (permanent); fall back to
+            # the original Facebook CDN url (may expire). HTML lives in out/,
+            # images in ../images/, so prefix the local path with "../".
+            "img": ("../" + r["image_file"]) if r.get("image_file")
+                   else r.get("image_url", ""),
         })
     return rows
 
@@ -88,6 +93,17 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   a { color: #0969da; text-decoration: none; }
   a:hover { text-decoration: underline; }
   .note { padding: 12px 20px; color: #57606a; font-size: 12px; }
+  td.thumb { padding: 4px; }
+  td.thumb img { width: 84px; height: 84px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); display: block; }
+  /* Gallery view */
+  #gallery { display: none; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; padding: 16px 20px 50px; }
+  .card { background: #fff; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; display: flex; flex-direction: column; }
+  .card img { width: 100%; height: 200px; object-fit: cover; background: #f0f0f0; }
+  .card .body { padding: 10px 12px; font-size: 13px; }
+  .card .adv { font-weight: 600; margin-bottom: 4px; }
+  .card .meta { color: #57606a; font-size: 12px; }
+  .card .big { font-size: 17px; font-weight: 700; }
+  .card a.open { display: block; padding: 8px 12px; border-top: 1px solid var(--line); font-size: 12px; }
 </style>
 </head>
 <body>
@@ -111,15 +127,17 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   </label>
   <label class="chk"><input type="checkbox" id="pricedOnly" checked> Priced only</label>
   <label class="chk"><input type="checkbox" id="hideFlagged" checked> Hide bad parses</label>
+  <button id="viewToggle">Gallery view</button>
   <button id="reset">Reset</button>
 </div>
 <div class="count" id="count"></div>
-<div class="wrap">
+<div class="wrap" id="tableWrap">
   <table id="tbl">
     <thead><tr></tr></thead>
     <tbody></tbody>
   </table>
 </div>
+<div id="gallery"></div>
 <div class="note">
   Tip: a price <em>below</em> the rebate estimate means the advertised figure is already your
   out-of-pocket (post-rebate) price. Always confirm with the installer: post-rebate?, usable vs
@@ -129,6 +147,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <script>
 const DATA = __DATA__;
 const COLS = [
+  {key:"thumb",      label:"Ad",         num:false},
   {key:"advertiser", label:"Advertiser", num:false},
   {key:"kwh",        label:"kWh",        num:true},
   {key:"price",      label:"Price $",    num:true},
@@ -142,7 +161,7 @@ const COLS = [
   {key:"flag",       label:"Flag",       num:false},
   {key:"links",      label:"Links",      num:false},
 ];
-let sortKey = "per_kwh", sortAsc = true;
+let sortKey = "per_kwh", sortAsc = true, view = "table";
 
 function dealClass(v){ if(v==null) return ""; if(v<=300) return "good"; if(v<=450) return "mid"; return "bad"; }
 
@@ -153,7 +172,7 @@ function buildHead(){
     const th = document.createElement("th");
     const arrow = (c.key===sortKey) ? (sortAsc?" ▲":" ▼") : "";
     th.innerHTML = c.label + '<span class="arrow">'+arrow+'</span>';
-    if(c.key!=="links") th.onclick = ()=>{ if(sortKey===c.key) sortAsc=!sortAsc; else {sortKey=c.key; sortAsc=c.num?true:true;} render(); };
+    if(c.key!=="links" && c.key!=="thumb") th.onclick = ()=>{ if(sortKey===c.key) sortAsc=!sortAsc; else {sortKey=c.key; sortAsc=c.num?true:true;} render(); };
     tr.appendChild(th);
   }
 }
@@ -187,11 +206,18 @@ function render(){
     if(typeof x==="string"){ x=x.toLowerCase(); y=(y||"").toLowerCase(); }
     return (x<y?-1:x>y?1:0) * (sortAsc?1:-1);
   });
+  if(view==="gallery"){ renderGallery(rows); countEl.textContent = rows.length + " of " + DATA.length + " ads shown"; return; }
   const tb = document.querySelector("tbody");
   tb.innerHTML = "";
   for(const r of rows){
     const tr = document.createElement("tr");
     const cells = COLS.map(c=>{
+      if(c.key==="thumb"){
+        if(!r.img) return '<td class="thumb"></td>';
+        const link = r.library || r.landing || r.img;
+        return '<td class="thumb"><a href="'+link+'" target="_blank">'
+             + '<img loading="lazy" src="'+r.img+'" onerror="this.style.display=\'none\'"></a></td>';
+      }
       if(c.key==="links"){
         let h="";
         if(r.library) h+='<a href="'+r.library+'" target="_blank">ad</a>';
@@ -212,6 +238,29 @@ function render(){
   countEl.textContent = rows.length + " of " + DATA.length + " ads shown";
 }
 
+function renderGallery(rows){
+  const g = document.getElementById("gallery");
+  g.innerHTML = "";
+  for(const r of rows){
+    const link = r.library || r.landing || "#";
+    const img = r.img ? '<img loading="lazy" src="'+r.img+'" onerror="this.style.visibility=\'hidden\'">' : '<div style="height:200px"></div>';
+    const pk = r.per_kwh!=null ? '<span class="pill '+dealClass(r.per_kwh)+'">$'+r.per_kwh.toLocaleString()+'/kWh</span>' : '';
+    const price = r.price!=null ? '$'+r.price.toLocaleString() : 'quote only';
+    const kwh = r.kwh!=null ? r.kwh+' kWh' : '';
+    const st = r.status ? ' &middot; '+r.status : '';
+    const days = r.days!=null ? ' &middot; '+r.days+'d' : '';
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML =
+      '<a href="'+link+'" target="_blank">'+img+'</a>'
+      + '<div class="body"><div class="adv">'+(r.advertiser||'')+'</div>'
+      + '<div class="big">'+price+' '+pk+'</div>'
+      + '<div class="meta">'+kwh+st+days+(r.flag?' &middot; ⚠ '+r.flag:'')+'</div></div>'
+      + '<a class="open" href="'+link+'" target="_blank">Open ad ↗</a>';
+    g.appendChild(card);
+  }
+}
+
 const minKwhEl=document.getElementById("minKwh"), maxKwhEl=document.getElementById("maxKwh"),
   maxPerKwhEl=document.getElementById("maxPerKwh"), minDaysEl=document.getElementById("minDays"),
   searchEl=document.getElementById("search"), statusEl=document.getElementById("status"),
@@ -220,6 +269,13 @@ const minKwhEl=document.getElementById("minKwh"), maxKwhEl=document.getElementBy
 [minKwhEl,maxKwhEl,maxPerKwhEl,minDaysEl,searchEl,statusEl,pricedOnlyEl,hideFlaggedEl].forEach(el=>{
   el.addEventListener("input", render);
 });
+document.getElementById("viewToggle").onclick=(e)=>{
+  view = (view==="table") ? "gallery" : "table";
+  document.getElementById("tableWrap").style.display = (view==="table") ? "" : "none";
+  document.getElementById("gallery").style.display = (view==="gallery") ? "grid" : "none";
+  e.target.textContent = (view==="table") ? "Gallery view" : "Table view";
+  render();
+};
 document.getElementById("reset").onclick=()=>{
   [minKwhEl,maxKwhEl,maxPerKwhEl,minDaysEl,searchEl].forEach(el=>el.value="");
   statusEl.value=""; pricedOnlyEl.checked=true; hideFlaggedEl.checked=true; sortKey="per_kwh"; sortAsc=true; render();
