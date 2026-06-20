@@ -1,0 +1,41 @@
+# Copy to config.yaml and fill in. config.yaml is gitignored (holds your key).
+
+# Google Maps Platform API key (enable: Maps Static, Geocoding, Solar API).
+google_api_key: "YOUR_KEY_HERE"
+
+target_suburb: "Dulwich, SA"
+country: "AU"
+
+imagery:
+  source: google          # google | licensed | local
+  zoom: 20                 # ~20-21 for rooftop detail
+  size: "640x640"          # Static Maps max free size per tile
+
+detect:
+  backend: vision_model    # vision_model | cnn
+  min_confidence: 0.7      # mail only roofs classified no-solar above this
+  # vision_model_endpoint / api_key wired in detect.py
+
+render:
+  mode: composite          # composite | ai
+  panel_texture: assets/panel.png
+
+# Reused by savings.py — your retail tariff + solar assumptions (Adelaide).
+tariff:
+  retail_rate: 0.3641      # $/kWh offset when self-consumed (use your peak/usage blend)
+  feed_in_tariff: 0.05     # $/kWh exported
+  self_consumption: 0.40   # fraction of generation used on-site (no battery)
+  specific_yield: 1400     # kWh per kW per year, Adelaide
+
+flyer:
+  brand: "Your Solar Co"
+  cta: "Book a free assessment"
+  booking_url: "https://example.com/book"
+  phone: "1300 000 000"
+  format: "A4"             # A4 | DL
+
+mail:
+  mode: addressed          # addressed | unaddressed
+  salutation: "To the Homeowner"
+
+output_dir: "out"

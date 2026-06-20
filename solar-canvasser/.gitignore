@@ -1,0 +1,14 @@
+# Secrets — holds your Google API key
+config.yaml
+
+# Generated artefacts
+out/
+tiles/
+flyers/
+*.pdf
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
