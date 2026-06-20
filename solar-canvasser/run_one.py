@@ -70,11 +70,15 @@ def main() -> int:
     print(f"[savings] ~${s['annual_saving_aud']}/yr "
           f"({s['annual_generation_kwh']} kWh/yr)")
 
-    flyer_path = render_flyer(
+    res = render_flyer(
         {"address": args.address, "system_kw": s["system_kw"],
          "annual_kwh": s["annual_generation_kwh"], "annual_saving": s["annual_saving_aud"]},
         rendered, cfg, str(out / "flyers" / "one.html"))
-    print(f"[flyer] {flyer_path}  (open it, or convert to PDF)")
+    print(f"[flyer] html: {res['html']}")
+    if res.get("pdf"):
+        print(f"[flyer] pdf:  {res['pdf']}  (print-ready)")
+    else:
+        print(f"[flyer] pdf skipped: {res.get('pdf_error')}")
     return 0
 
 

@@ -62,7 +62,7 @@ def main() -> int:
 
             rendered = render.render_with_solar(tile, segs, cfg)
             s = savings.annual_saving(system_kw, a, annual_kwh)
-            fp = render_flyer(
+            res = render_flyer(
                 {"address": ad.full, "system_kw": s["system_kw"],
                  "annual_kwh": s["annual_generation_kwh"],
                  "annual_saving": s["annual_saving_aud"]},
@@ -71,7 +71,7 @@ def main() -> int:
                 "salutation": cfg.get("mail", {}).get("salutation", "To the Homeowner"),
                 "address": ad.full, "suburb": ad.suburb, "postcode": ad.postcode,
                 "system_kw": s["system_kw"], "annual_saving": s["annual_saving_aud"],
-                "flyer_path": fp,
+                "flyer_path": res.get("pdf") or res["html"],
             })
         except NotImplementedError as e:
             raise SystemExit(f"[detect] backend not wired yet: {e}")
