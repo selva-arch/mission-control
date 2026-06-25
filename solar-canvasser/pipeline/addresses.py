@@ -13,6 +13,22 @@ from dataclasses import dataclass
 import requests
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+
+
+def geocode(address: str, user_agent: str = "solar-canvasser") -> tuple[float, float]:
+    """Free address -> (lat, lon) via OpenStreetMap Nominatim (no API key).
+
+    Nominatim asks for a descriptive User-Agent and ~1 req/sec — fine for
+    individual lookups. Returns the best match's coordinates."""
+    r = requests.get(NOMINATIM_URL,
+                     params={"q": address, "format": "json", "limit": 1},
+                     headers={"User-Agent": user_agent}, timeout=30)
+    r.raise_for_status()
+    res = r.json()
+    if not res:
+        raise ValueError(f"Could not geocode: {address!r}")
+    return float(res[0]["lat"]), float(res[0]["lon"])
 
 
 @dataclass
