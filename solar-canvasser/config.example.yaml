@@ -21,8 +21,15 @@ imagery:
   size: "640x640"          # (google only) Static Maps tile size
 
 detect:
-  backend: nearmap         # nearmap | vision_model | cnn
-  min_confidence: 0.5      # PV-panel confidence threshold (Nearmap), tune to ground truth
+  backend: vision_model    # nearmap (needs AI entitlement) | vision_model (works now) | cnn
+  min_confidence: 0.6      # mail only roofs classified no-solar at/above this confidence
+  vision:                  # automated detector running on the Nearmap tiles
+    provider: anthropic    # anthropic | openai
+    model: claude-haiku-4-5-20251001   # cheap+fast vision; or gpt-4o-mini for openai
+    # api_key: optional — else reads ANTHROPIC_API_KEY / OPENAI_API_KEY from env
+
+sizing:
+  default_kw: 6.6          # used when no Google Solar API / Nearmap roof area available
 
 render:
   mode: composite          # composite | ai

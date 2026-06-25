@@ -12,7 +12,12 @@ roofs should go to a human review queue (hybrid).
 from __future__ import annotations
 
 import base64
+import json
+import os
+import re
 from dataclasses import dataclass
+
+import requests
 
 
 @dataclass
@@ -60,19 +65,69 @@ def _detect_nearmap(cfg: dict, lat: float | None, lon: float | None) -> Detectio
 
 
 def _detect_vision(tile_png: bytes, cfg: dict) -> Detection:
-    """Call a multimodal model with the tile. Wire your provider here.
+    """Classify the roof tile with a multimodal model (Anthropic or OpenAI)."""
+    v = cfg.get("detect", {}).get("vision", {})
+    provider = v.get("provider", "anthropic")
+    img_b64 = base64.b64encode(tile_png).decode()
+    if provider == "anthropic":
+        text = _call_anthropic(img_b64, v)
+    elif provider == "openai":
+        text = _call_openai(img_b64, v)
+    else:
+        raise ValueError(f"Unknown vision provider: {provider}")
+    return _parse_verdict(text)
 
-    Kept provider-agnostic: implement `_call_vision(prompt, image_b64)` against
-    whichever vision API you use (it should return JSON text). The b64 + prompt
-    plumbing is done; only the HTTP call is left as an integration point so this
-    file has no hard provider dependency.
-    """
-    image_b64 = base64.b64encode(tile_png).decode()
-    raise NotImplementedError(
-        "Wire _detect_vision to your vision API: send PROMPT + image_b64, parse "
-        "the JSON reply into Detection(has_panels, confidence). "
-        f"(image is {len(image_b64)} b64 chars, ready to send.)"
-    )
+
+def _parse_verdict(text: str) -> Detection:
+    m = re.search(r"\{.*\}", text or "", re.S)
+    if not m:
+        return Detection(False, 0.0, note=f"unparseable: {(text or '')[:80]}")
+    try:
+        d = json.loads(m.group(0))
+        return Detection(bool(d.get("has_panels")),
+                         float(d.get("confidence", 0.5)),
+                         note=str(d.get("note", "")))
+    except (ValueError, TypeError):
+        return Detection(False, 0.0, note=f"bad json: {text[:80]}")
+
+
+def _call_anthropic(img_b64: str, v: dict) -> str:
+    key = v.get("api_key") or os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        raise RuntimeError("Set ANTHROPIC_API_KEY (or detect.vision.api_key)")
+    model = v.get("model", "claude-haiku-4-5-20251001")
+    body = {
+        "model": model, "max_tokens": 120,
+        "messages": [{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64",
+             "media_type": "image/jpeg", "data": img_b64}},
+            {"type": "text", "text": PROMPT},
+        ]}],
+    }
+    r = requests.post("https://api.anthropic.com/v1/messages", json=body, timeout=60,
+                      headers={"x-api-key": key, "anthropic-version": "2023-06-01",
+                               "content-type": "application/json"})
+    r.raise_for_status()
+    return "".join(b.get("text", "") for b in r.json().get("content", []))
+
+
+def _call_openai(img_b64: str, v: dict) -> str:
+    key = v.get("api_key") or os.environ.get("OPENAI_API_KEY")
+    if not key:
+        raise RuntimeError("Set OPENAI_API_KEY (or detect.vision.api_key)")
+    model = v.get("model", "gpt-4o-mini")
+    body = {
+        "model": model, "max_tokens": 120,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": PROMPT},
+            {"type": "image_url", "image_url":
+                {"url": f"data:image/jpeg;base64,{img_b64}"}},
+        ]}],
+    }
+    r = requests.post("https://api.openai.com/v1/chat/completions", json=body, timeout=60,
+                      headers={"Authorization": f"Bearer {key}"})
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"]["content"]
 
 
 def _detect_cnn(tile_png: bytes, cfg: dict) -> Detection:

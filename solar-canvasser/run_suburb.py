@@ -36,7 +36,9 @@ def main() -> int:
     min_conf = cfg.get("detect", {}).get("min_confidence", 0.7)
 
     src = imagery.build_source(cfg)
-    sapi = solar.GoogleSolarAPI(cfg["google_api_key"])
+    default_kw = cfg.get("sizing", {}).get("default_kw", 6.6)
+    gkey = cfg.get("google_api_key", "")
+    sapi = solar.GoogleSolarAPI(gkey) if gkey and gkey != "YOUR_KEY_HERE" else None
     a = savings.SolarAssumptions(**{k: v for k, v in cfg.get("tariff", {}).items()
                                     if k in savings.SolarAssumptions.__annotations__})
 
@@ -47,7 +49,7 @@ def main() -> int:
     for i, ad in enumerate(addrs, 1):
         try:
             tile = src.tile(ad.lat, ad.lon)
-            det = detect.detect(tile, cfg)
+            det = detect.detect(tile, cfg, lat=ad.lat, lon=ad.lon)
             if det.has_panels:
                 skipped += 1
                 continue
@@ -55,10 +57,16 @@ def main() -> int:
                 queued += 1   # send to human review instead of mailing
                 continue
 
-            ins = sapi.insight(ad.lat, ad.lon)
-            system_kw = ins.max_system_kw if ins else 6.6
-            annual_kwh = ins.annual_kwh if ins else None
-            segs = ins.segments if ins else None
+            # Sizing: Google Solar API if configured, else a sensible default.
+            system_kw, annual_kwh, segs = default_kw, None, None
+            if sapi:
+                try:
+                    ins = sapi.insight(ad.lat, ad.lon)
+                    if ins:
+                        system_kw, annual_kwh, segs = (
+                            ins.max_system_kw, ins.annual_kwh, ins.segments)
+                except Exception:  # noqa: BLE001
+                    pass
 
             rendered = render.render_with_solar(tile, segs, cfg)
             s = savings.annual_saving(system_kw, a, annual_kwh)
