@@ -1,20 +1,28 @@
 # Copy to config.yaml and fill in. config.yaml is gitignored (holds your key).
 
-# Google Maps Platform API key (enable: Maps Static, Geocoding, Solar API).
+# Google Maps Platform API key (only needed if imagery.source = google).
 google_api_key: "YOUR_KEY_HERE"
+
+# Nearmap API key (Integrations > API Keys). Keep secret — config.yaml is gitignored.
+nearmap:
+  api_key: "YOUR_NEARMAP_KEY"
+  packs: "solar,roof_char"          # AI packs (confirm via packs.json on your account)
+  ai_path: "/ai/features/v4/features.json"   # or /ai/features/v4/bulk/features.json
+  aoi_size_m: 25                     # square AOI around each address point (metres)
 
 target_suburb: "Dulwich, SA"
 country: "AU"
 
 imagery:
-  source: google          # google | licensed | local
-  zoom: 20                 # ~20-21 for rooftop detail
-  size: "640x640"          # Static Maps max free size per tile
+  source: nearmap         # nearmap | google | licensed | local
+  zoom: 21                 # Nearmap Vert detail; ~20-21
+  tile_grid: 3             # NxN tiles to stitch (odd)
+  footprint_m: 40          # crop box around the roof (metres)
+  size: "640x640"          # (google only) Static Maps tile size
 
 detect:
-  backend: vision_model    # vision_model | cnn
-  min_confidence: 0.7      # mail only roofs classified no-solar above this
-  # vision_model_endpoint / api_key wired in detect.py
+  backend: nearmap         # nearmap | vision_model | cnn
+  min_confidence: 0.5      # PV-panel confidence threshold (Nearmap), tune to ground truth
 
 render:
   mode: composite          # composite | ai

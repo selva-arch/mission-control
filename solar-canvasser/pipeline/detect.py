@@ -30,13 +30,33 @@ PROMPT = (
 )
 
 
-def detect(tile_png: bytes, cfg: dict) -> Detection:
+def detect(tile_png: bytes, cfg: dict,
+           lat: float | None = None, lon: float | None = None) -> Detection:
     backend = cfg.get("detect", {}).get("backend", "vision_model")
+    if backend == "nearmap":
+        return _detect_nearmap(cfg, lat, lon)
     if backend == "vision_model":
         return _detect_vision(tile_png, cfg)
     if backend == "cnn":
         return _detect_cnn(tile_png, cfg)
     raise ValueError(f"Unknown detect backend: {backend}")
+
+
+def _detect_nearmap(cfg: dict, lat: float | None, lon: float | None) -> Detection:
+    """Authoritative detection via Nearmap AI (by coordinates, not the tile)."""
+    from .nearmap import NearmapClient
+    nm = cfg.get("nearmap", {})
+    client = NearmapClient(
+        nm["api_key"], packs=nm.get("packs", "solar,roof_char"),
+        ai_path=nm.get("ai_path", "/ai/features/v4/features.json"),
+        min_confidence=cfg.get("detect", {}).get("min_confidence", 0.5),
+        aoi_size_m=nm.get("aoi_size_m", 25))
+    res = client.solar(lat, lon)
+    # Nearmap is authoritative: when it finds no PV we're confident it's a target.
+    return Detection(
+        has_panels=res.has_solar,
+        confidence=res.confidence if res.has_solar else 1.0,
+        note=f"roof={res.roof_area_sqm}m2 panels={res.panel_count} {res.error}".strip())
 
 
 def _detect_vision(tile_png: bytes, cfg: dict) -> Detection:

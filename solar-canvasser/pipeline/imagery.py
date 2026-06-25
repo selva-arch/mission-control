@@ -68,4 +68,10 @@ def build_source(cfg: dict) -> ImagerySource:
                                    size=img.get("size", "640x640"))
     if src == "local":
         return LocalImagery(img.get("folder", "tiles"))
+    if src == "nearmap":
+        from .nearmap import NearmapTiles  # lazy: avoids circular import
+        return NearmapTiles(cfg["nearmap"]["api_key"],
+                            zoom=img.get("zoom", 21),
+                            grid=img.get("tile_grid", 3),
+                            footprint_m=img.get("footprint_m", 40))
     raise ValueError(f"Unknown imagery source: {src}")
