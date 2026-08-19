@@ -3,18 +3,11 @@
 # Meta Ad Library country code (AU = Australia)
 country: AU
 
-# Search terms. Each runs as a separate Ad Library query and results are merged
-# and de-duplicated by ad archive ID.
-keywords:
-  - solar battery
-  - home battery
-  - battery rebate
-  - Tesla Powerwall
-  - Sungrow battery
-  - Fox ESS battery
-  - Pylontech battery
-  - BYD battery
-  - Anker SOLIX
+# Search terms now live in targets.py, which builds the full matrix of
+# national keywords x product categories x state-scoped queries. Edit
+# CATEGORY_KEYWORDS / STATE_SCOPED_KEYWORDS there to change coverage.
+#
+# Product categories swept: battery, solar, ev_charger, heat_pump.
 
 # How many times to scroll each result page to lazy-load more ads.
 # ~10 pulls in a few hundred ads per keyword; raise for deeper sweeps.
@@ -37,8 +30,19 @@ ocr_enabled: true
 # not the first (hero) image, so OCR a few. Higher = better yield, slower.
 max_images_per_ad: 4
 
-# Output CSV path
+# Optional flat CSV export (written only with --csv). The archive itself lives
+# in SQLite at ../.data/solar-ads.db.
 output: out/solar-ads.csv
+
+# ---------------------------------------------------------------------------
+# LLM enrichment. Extracts offer structure that regex cannot reach (financing
+# vs sale price, urgency tactics, brand/model, state mentions).
+# Requires ANTHROPIC_API_KEY and `pip install anthropic`; skipped without them.
+# ---------------------------------------------------------------------------
+enrich:
+  # Accuracy matters most here — this step decides what the dashboard reports.
+  # claude-sonnet-5 or claude-haiku-4-5 are cheaper for large bulk passes.
+  model: claude-opus-5
 
 # Federal rebate model (Cheaper Home Batteries Program, from 1 May 2026).
 # Used to estimate the post-rebate price when an ad shows a pre-rebate figure.

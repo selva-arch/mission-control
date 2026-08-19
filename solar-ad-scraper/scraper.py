@@ -16,11 +16,13 @@ research, not bulk harvesting (see README for the ToS note).
 
 from __future__ import annotations
 
+import random
 import time
 from pathlib import Path
 from urllib.parse import quote
 
-from playwright.sync_api import sync_playwright
+# Imported lazily inside Session.__enter__ so that enrichment, CSV export and
+# dashboard queries work on a machine without a browser installed.
 
 # Persisted browser profile so you only log into Facebook once.
 PROFILE_DIR = Path(__file__).parent / ".fb-profile"
@@ -31,6 +33,15 @@ AD_LIBRARY_URL = (
     "&q={query}&media_type=all"
 )
 
+# "Everything this Page is running" — richer per request than a keyword search,
+# because it returns an advertiser's whole live rotation rather than only the
+# ads whose copy happens to match a search term.
+PAGE_LIBRARY_URL = (
+    "https://www.facebook.com/ads/library/"
+    "?active_status={active_status}&ad_type=all&country={country}"
+    "&view_all_page_id={page_id}&media_type=all"
+)
+
 
 def _search_url(keyword: str, country: str, active_status: str) -> str:
     return AD_LIBRARY_URL.format(
@@ -38,55 +49,121 @@ def _search_url(keyword: str, country: str, active_status: str) -> str:
     )
 
 
+def _page_url(page_id: str, country: str, active_status: str) -> str:
+    return PAGE_LIBRARY_URL.format(
+        country=country, page_id=quote(str(page_id)), active_status=active_status
+    )
+
+
 def search(keyword: str, country: str, max_scrolls: int, headless: bool,
-           active_status: str = "active") -> list[bytes]:
-    """Run one Ad Library search and return the raw GraphQL response bodies.
+           active_status: str = "active") -> list[str]:
+    """Run one Ad Library keyword search and return raw GraphQL response bodies.
 
-    Returns a list of response-body strings (JSON, possibly newline-delimited
-    multi-object streams). Parsing is left to extract.parse_ad_nodes().
+    Kept for backwards compatibility and one-off `--keyword` runs. A full sweep
+    should use Session, which reuses one browser across many queries instead of
+    paying browser startup 200+ times.
     """
-    bodies: list[str] = []
+    with Session(country, headless, active_status) as s:
+        return s.fetch_keyword(keyword, max_scrolls)
 
-    with sync_playwright() as p:
-        context = p.chromium.launch_persistent_context(
+
+class Session:
+    """A single browser kept open across many Ad Library queries.
+
+    Launching Chromium per query would dominate runtime on a 200-target sweep,
+    and repeated cold starts look far more robotic than one long human-ish
+    session. Paces itself between queries; this is personal competitive
+    research, not bulk harvesting.
+    """
+
+    def __init__(self, country: str, headless: bool, active_status: str = "all",
+                 min_query_gap_s: float = 4.0):
+        self.country = country
+        self.headless = headless
+        self.active_status = active_status
+        self.min_query_gap_s = min_query_gap_s
+        self._pw = None
+        self._context = None
+        self._page = None
+        self._last_query_at = 0.0
+
+    def __enter__(self):
+        from playwright.sync_api import sync_playwright
+
+        self._pw = sync_playwright().start()
+        self._context = self._pw.chromium.launch_persistent_context(
             user_data_dir=str(PROFILE_DIR),
-            headless=headless,
+            headless=self.headless,
             viewport={"width": 1280, "height": 900},
             locale="en-AU",
         )
-        page = context.pages[0] if context.pages else context.new_page()
+        self._page = self._context.pages[0] if self._context.pages \
+            else self._context.new_page()
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            if self._context:
+                self._context.close()
+        finally:
+            if self._pw:
+                self._pw.stop()
+        return False
+
+    # -- internals ---------------------------------------------------------
+
+    def _cooldown(self):
+        """Space out queries with jitter so the cadence is not machine-regular."""
+        elapsed = time.time() - self._last_query_at
+        wait = self.min_query_gap_s - elapsed
+        if wait > 0:
+            time.sleep(wait)
+        time.sleep(random.uniform(0.4, 1.6))
+
+    def _collect(self, url: str, max_scrolls: int) -> list[str]:
+        bodies: list[str] = []
+        page = self._page
 
         def on_response(response):
-            url = response.url
-            if "/api/graphql/" not in url and "/ads/library/async/" not in url:
+            if "/api/graphql/" not in response.url and \
+               "/ads/library/async/" not in response.url:
                 return
             try:
                 text = response.text()
             except Exception:
                 return
-            # Cheap pre-filter: only keep payloads that mention ad-library shapes.
             if "snapshot" in text or "ad_archive_id" in text or "adArchiveID" in text:
                 bodies.append(text)
 
         page.on("response", on_response)
+        try:
+            self._cooldown()
+            page.goto(url, wait_until="domcontentloaded")
 
-        page.goto(_search_url(keyword, country, active_status),
-                  wait_until="domcontentloaded")
+            if "login" in page.url or "checkpoint" in page.url:
+                print("  → Facebook wants a login. Log in in the opened window, "
+                      "then results will load automatically.")
+                _wait_for_results(page, timeout_s=180)
 
-        # First run: give the user time to log in if redirected to a login wall.
-        if "login" in page.url or "checkpoint" in page.url:
-            print("  → Facebook wants a login. Log in in the opened window, "
-                  "then results will load automatically.")
-            _wait_for_results(page, timeout_s=180)
+            _wait_for_results(page, timeout_s=30)
+            _scroll_to_load(page, max_scrolls)
+            page.wait_for_timeout(1500)
+        finally:
+            page.remove_listener("response", on_response)
+            self._last_query_at = time.time()
+        return bodies
 
-        _wait_for_results(page, timeout_s=30)
-        _scroll_to_load(page, max_scrolls)
+    # -- public ------------------------------------------------------------
 
-        # Let the final batch of responses settle.
-        page.wait_for_timeout(1500)
-        context.close()
+    def fetch_keyword(self, keyword: str, max_scrolls: int) -> list[str]:
+        return self._collect(
+            _search_url(keyword, self.country, self.active_status), max_scrolls
+        )
 
-    return bodies
+    def fetch_page(self, page_id: str, max_scrolls: int) -> list[str]:
+        return self._collect(
+            _page_url(page_id, self.country, self.active_status), max_scrolls
+        )
 
 
 def _wait_for_results(page, timeout_s: int) -> None:
@@ -100,16 +177,19 @@ def _wait_for_results(page, timeout_s: int) -> None:
 
 
 def _scroll_to_load(page, max_scrolls: int) -> None:
-    """Scroll to the bottom repeatedly to trigger lazy-loaded result batches."""
+    """Scroll to the bottom repeatedly to trigger lazy-loaded result batches.
+
+    Delays are jittered rather than fixed: a metronome-regular 1800 ms scroll is
+    both a fingerprint and harder on the endpoint than a human reading pace.
+    """
     last_height = 0
     for _ in range(max_scrolls):
-        page.mouse.wheel(0, 20000)
-        # Human-ish pause so we don't hammer the endpoint.
-        page.wait_for_timeout(1800)
+        page.mouse.wheel(0, random.randint(15000, 24000))
+        page.wait_for_timeout(random.randint(1500, 3200))
         height = page.evaluate("document.body.scrollHeight")
         if height == last_height:
             # Nudge once more in case of a slow batch, then stop if still stuck.
-            page.wait_for_timeout(1500)
+            page.wait_for_timeout(random.randint(1200, 2200))
             height = page.evaluate("document.body.scrollHeight")
             if height == last_height:
                 break

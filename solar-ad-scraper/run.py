@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """
-Solar Ad Scraper — sweep the Meta Ad Library (Australia) for solar/home battery
-ads, pull prices out of the ad text AND the creative images, normalise to
-$ per usable kWh after the federal rebate, and write a sorted CSV.
+Solar Ad Intelligence — sweep the Meta Ad Library (Australia) for solar,
+battery, EV-charger and heat-pump ads; archive every ad, creative and offer
+into SQLite; infer which states each ad targets; and rank offers by value.
 
 Usage:
-    python run.py                  # uses config.yaml
-    python run.py --config my.yaml
-    python run.py --keyword "Sungrow battery"   # one-off single search
+    python run.py --pilot              # small sweep to validate the pipeline
+    python run.py                      # full sweep (hours; resumable)
+    python run.py --resume             # continue the last unfinished sweep
+    python run.py --advertisers        # second stage: all ads per known Page
+    python run.py --enrich-only        # LLM pass over already-collected ads
+    python run.py --keyword "Sungrow"  # one ad-hoc search
+    python run.py --csv                # also export a flat CSV
 
 First run opens a browser; log into Facebook once and the session is reused.
 """
@@ -17,16 +21,24 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import json
 import sys
+import time
 from pathlib import Path
 
 import yaml
 
+import enrich
 import extract
 import normalize
 import scraper
+import states as states_mod
+import store
+import targets as targets_mod
 
 HERE = Path(__file__).parent
+DATA_DIR = HERE.parent / ".data"
+CREATIVES_DIR = DATA_DIR / "solar-ads" / "creatives"
 
 
 def load_config(path: Path) -> dict:
@@ -34,124 +46,314 @@ def load_config(path: Path) -> dict:
         return yaml.safe_load(f)
 
 
-def download_image(url: str, dest_dir: Path) -> Path | None:
+def config_hash(cfg: dict) -> str:
+    return hashlib.sha1(json.dumps(cfg, sort_keys=True).encode()).hexdigest()[:12]
+
+
+def download_creative(url: str, dest_dir: Path) -> tuple[Path | None, str]:
+    """Fetch one creative, named by content hash. Returns (path, sha1).
+
+    Facebook CDN URLs expire, so the local copy is the only durable archive.
+    Hashing the URL keeps the filename stable across runs so re-sweeps skip
+    files already on disk.
+    """
     import requests
 
     dest_dir.mkdir(parents=True, exist_ok=True)
-    name = hashlib.sha1(url.encode()).hexdigest()[:16] + ".jpg"
-    dest = dest_dir / name
+    sha = hashlib.sha1(url.encode()).hexdigest()
+    dest = dest_dir / f"{sha[:16]}.jpg"
     if dest.exists():
-        return dest
+        return dest, sha
     try:
         r = requests.get(url, timeout=30)
         r.raise_for_status()
         dest.write_bytes(r.content)
-        return dest
+        return dest, sha
     except Exception:
-        return None
+        return None, sha
+
+
+def process_ad(conn, cfg: dict, sweep_id: int, ad, target) -> None:
+    """Persist one ad: identity, creatives+OCR, prices, and state signals."""
+    category = (target["category"] if target else "") or "mixed"
+
+    store.upsert_advertiser(conn, ad.page_id, ad.page_name)
+    store.upsert_ad(conn, ad)
+    store.record_snapshot(conn, sweep_id, ad)
+    if target:
+        store.link_ad_target(conn, sweep_id, ad.ad_archive_id, target["target_key"])
+
+    # --- creatives + OCR ---------------------------------------------------
+    if cfg.get("ocr_enabled", True):
+        ocr_chunks: list[str] = []
+        cap = cfg.get("max_images_per_ad", 4)
+        images = ad.image_urls[:cap]
+        posters = ad.video_poster_urls[:max(0, cap - len(images))]
+        for url, kind in [(u, "image") for u in images] + \
+                         [(u, "video_poster") for u in posters]:
+            local, sha = download_creative(url, CREATIVES_DIR)
+            if not local:
+                continue
+            text = extract.ocr_image(str(local))
+            if text:
+                ocr_chunks.append(text)
+            store.upsert_creative(
+                conn, sha, ad.ad_archive_id, kind=kind, source_url=url,
+                local_path=local.name, ocr_text=text,
+                size_bytes=local.stat().st_size if local.exists() else None,
+            )
+        if ocr_chunks:
+            ad.ocr_text = "\n".join(ocr_chunks)
+            store.upsert_ad(conn, ad)  # write OCR text back onto the ad
+
+    text = ad.all_text
+    # A per-advertiser sweep returns everything a Page runs, so the search
+    # category is meaningless there — classify from the copy instead.
+    if category == "mixed":
+        category = extract.classify_category(text)
+
+    # --- prices ------------------------------------------------------------
+    rebate = normalize.RebateModel(**(cfg.get("rebate") or {}))
+    prices = extract.extract_prices(text, category)
+    caps = extract.extract_capacities(text)
+    kws = extract.extract_system_sizes(text)
+    cmp = normalize.compare(prices, caps, rebate)
+
+    dpk = cmp.dollars_per_kwh
+    price = cmp.price
+    dollars_per_kw = None
+    if price and kws:
+        dollars_per_kw = round(price / max(kws), 1)
+
+    flag = ""
+    lo, hi = extract.DOLLARS_PER_KWH_BAND
+    if dpk and not (lo <= dpk <= hi):
+        flag = "check-parse"
+    klo, khi = extract.DOLLARS_PER_KW_BAND
+    if dollars_per_kw and not (klo <= dollars_per_kw <= khi):
+        flag = flag or "check-parse-kw"
+
+    store.record_price(
+        conn, ad.ad_archive_id, sweep_id, "regex",
+        price_aud=price, capacity_kwh=cmp.capacity_kwh,
+        system_kw=max(kws) if kws else None,
+        dollars_per_kwh=dpk, dollars_per_kw=dollars_per_kw,
+        est_rebate_aud=cmp.est_rebate, flag=flag,
+        all_prices=prices, all_kwh=caps, all_kw=kws,
+    )
+
+    # --- state inference ---------------------------------------------------
+    row = conn.execute(
+        "SELECT home_state FROM advertisers WHERE page_id = ?", (ad.page_id,)
+    ).fetchone() if ad.page_id else None
+    signals = states_mod.resolve(states_mod.infer(
+        text,
+        query_state=(target["state"] if target else "") or "",
+        advertiser_state=(row["home_state"] if row and row["home_state"] else ""),
+    ))
+    if signals:
+        store.record_states(conn, ad.ad_archive_id, signals)
+
+
+def run_sweep(conn, cfg: dict, sweep_id: int, target_rows: list) -> None:
+    """Drive the browser through every pending target, committing as we go.
+
+    Each target is committed on completion so an interrupted sweep resumes
+    from the last finished query rather than starting over.
+    """
+    total = len(target_rows)
+    with scraper.Session(
+        country=cfg.get("country", "AU"),
+        headless=cfg.get("headless", False),
+        active_status=cfg.get("active_status", "all"),
+    ) as session:
+        for i, target in enumerate(target_rows, 1):
+            label = target["query"]
+            print(f"[{i}/{total}] {target['kind']}: {label} "
+                  f"({target['state'] or 'national'})")
+            store.start_target(conn, sweep_id, target["target_key"])
+            try:
+                if target["kind"] == "advertiser":
+                    bodies = session.fetch_page(
+                        target["query"], cfg.get("max_scrolls", 25))
+                else:
+                    bodies = session.fetch_keyword(
+                        target["query"], cfg.get("max_scrolls", 25))
+                ads = extract.parse_ad_nodes(bodies)
+                for ad in ads.values():
+                    process_ad(conn, cfg, sweep_id, ad, target)
+                conn.commit()
+                store.finish_target(conn, sweep_id, target["target_key"], len(ads))
+                print(f"      {len(ads)} ads")
+            except KeyboardInterrupt:
+                conn.commit()
+                print("\n[abort] interrupted — re-run with --resume to continue")
+                raise
+            except Exception as e:
+                conn.commit()
+                store.finish_target(conn, sweep_id, target["target_key"],
+                                    0, status="failed", error=str(e))
+                print(f"      ! failed: {e}")
+
+
+def export_csv(conn, out_path: Path) -> int:
+    """Flat export of the newest reading per ad, best value first."""
+    rows = conn.execute("""
+        SELECT a.ad_archive_id, a.page_name, a.title, a.body_text, a.link_url,
+               p.price_aud, p.capacity_kwh, p.system_kw, p.dollars_per_kwh,
+               p.dollars_per_kw, p.est_rebate_aud, p.flag,
+               s.is_active, s.collation_count, s.days_running,
+               (SELECT GROUP_CONCAT(DISTINCT state) FROM ad_states
+                 WHERE ad_archive_id = a.ad_archive_id
+                   AND confidence = 'high')                    AS states_high,
+               (SELECT product_category FROM ad_offers
+                 WHERE ad_archive_id = a.ad_archive_id
+                 ORDER BY id DESC LIMIT 1)                     AS category
+        FROM ads a
+        LEFT JOIN price_observations p
+               ON p.ad_archive_id = a.ad_archive_id AND p.source = 'regex'
+              AND p.id = (SELECT MAX(id) FROM price_observations
+                           WHERE ad_archive_id = a.ad_archive_id AND source='regex')
+        LEFT JOIN ad_snapshots s
+               ON s.ad_archive_id = a.ad_archive_id
+              AND s.id = (SELECT MAX(id) FROM ad_snapshots
+                           WHERE ad_archive_id = a.ad_archive_id)
+        ORDER BY (p.dollars_per_kwh IS NULL), p.dollars_per_kwh
+    """).fetchall()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", newline="") as f:
+        if not rows:
+            f.write("no data\n")
+            return 0
+        w = csv.DictWriter(f, fieldnames=rows[0].keys())
+        w.writeheader()
+        for r in rows:
+            w.writerow(dict(r))
+    return len(rows)
+
+
+def print_summary(conn, sweep_id: int) -> None:
+    def scalar(sql, args=()):
+        return conn.execute(sql, args).fetchone()[0]
+
+    print("\n" + "=" * 60)
+    print(f"  ads archived      : {scalar('SELECT COUNT(*) FROM ads')}")
+    print(f"  advertisers       : {scalar('SELECT COUNT(*) FROM advertisers')}")
+    print(f"  creatives stored  : {scalar('SELECT COUNT(*) FROM creatives')}")
+    print(f"  seen this sweep   : "
+          f"{scalar('SELECT COUNT(*) FROM ad_snapshots WHERE sweep_id=?', (sweep_id,))}")
+
+    print("\n  high-confidence state signals:")
+    for r in conn.execute(
+        "SELECT state, COUNT(DISTINCT ad_archive_id) n FROM ad_states "
+        "WHERE confidence='high' GROUP BY state ORDER BY n DESC"
+    ):
+        print(f"    {r['state']:<9} {r['n']}")
+
+    # Latest reading per ad only — otherwise an ad seen in N sweeps appears
+    # N times in the ranking.
+    top = conn.execute("""
+        SELECT a.page_name, p.dollars_per_kwh, p.capacity_kwh, p.price_aud
+        FROM price_observations p JOIN ads a USING (ad_archive_id)
+        WHERE p.id = (SELECT MAX(id) FROM price_observations
+                       WHERE ad_archive_id = p.ad_archive_id AND source = p.source)
+          AND p.source = 'regex'
+          AND p.dollars_per_kwh IS NOT NULL AND COALESCE(p.flag,'') = ''
+        ORDER BY p.dollars_per_kwh LIMIT 5
+    """).fetchall()
+    if top:
+        print("\n  best $/usable kWh:")
+        for r in top:
+            print(f"    {r['dollars_per_kwh']:>7} $/kWh  {r['capacity_kwh']:>6} kWh  "
+                  f"${r['price_aud']:<8} {(r['page_name'] or '')[:32]}")
+    print("=" * 60)
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Meta Ad Library solar battery sweep")
+    ap = argparse.ArgumentParser(description="Meta Ad Library solar sweep")
     ap.add_argument("--config", default=str(HERE / "config.yaml"))
-    ap.add_argument("--keyword", help="run a single keyword instead of config list")
+    ap.add_argument("--keyword", help="run a single ad-hoc keyword search")
+    ap.add_argument("--pilot", action="store_true",
+                    help="small validation sweep (a few keywords, 2 states)")
+    ap.add_argument("--resume", action="store_true",
+                    help="continue the most recent unfinished sweep")
+    ap.add_argument("--advertisers", action="store_true",
+                    help="sweep every ad from each discovered advertiser Page")
+    ap.add_argument("--enrich-only", action="store_true",
+                    help="run the LLM extraction over collected ads, no scraping")
+    ap.add_argument("--no-enrich", action="store_true",
+                    help="skip the LLM extraction step")
+    ap.add_argument("--csv", action="store_true", help="also write a flat CSV")
+    ap.add_argument("--db", default=None, help="override database path")
     args = ap.parse_args()
 
     cfg = load_config(Path(args.config))
-    keywords = [args.keyword] if args.keyword else cfg["keywords"]
-    country = cfg.get("country", "AU")
-    rebate = normalize.RebateModel(**(cfg.get("rebate") or {}))
+    conn = store.connect(args.db)
+    enrich_cfg = cfg.get("enrich") or {}
+    model = enrich_cfg.get("model", enrich.DEFAULT_MODEL)
 
-    # 1. Scrape each keyword and merge ad nodes (deduped by archive id).
-    all_ads: dict[str, extract.Ad] = {}
-    for kw in keywords:
-        print(f"[scrape] {kw!r} ({country}) ...")
-        try:
-            bodies = scraper.search(
-                kw, country,
-                max_scrolls=cfg.get("max_scrolls", 12),
-                headless=cfg.get("headless", False),
-                active_status=cfg.get("active_status", "active"),
-            )
-        except Exception as e:
-            print(f"  ! scrape failed for {kw!r}: {e}")
-            continue
-        ads = extract.parse_ad_nodes(bodies)
-        print(f"  found {len(ads)} ads")
-        for aid, ad in ads.items():
-            all_ads.setdefault(aid, ad)
+    # --- enrichment-only path ---------------------------------------------
+    if args.enrich_only:
+        n = enrich.enrich_pending(conn, store, model=model)
+        print(f"[enrich] {n} ads enriched")
+        conn.close()
+        return 0
 
-    print(f"\n[total] {len(all_ads)} unique ads")
+    # --- pick or create the sweep -----------------------------------------
+    mode = "pilot" if args.pilot else ("advertiser" if args.advertisers else "full")
+    sweep_id = None
+    if args.resume:
+        sweep_id = store.latest_unfinished_sweep(conn)
+        if sweep_id:
+            print(f"[resume] continuing sweep {sweep_id}")
+        else:
+            print("[resume] no unfinished sweep found — starting a new one")
+    if sweep_id is None:
+        sweep_id = store.begin_sweep(conn, config_hash(cfg), mode)
 
-    # 2. OCR creatives + extract price/capacity signals.
-    img_dir = HERE / "images"
-    rows = []
-    for ad in all_ads.values():
-        image_file = ""
-        image_url = ad.image_urls[0] if ad.image_urls else ""
-        if cfg.get("ocr_enabled", True) and ad.image_urls:
-            # OCR every creative (capped), not just the first — the price often
-            # sits on a later card, while the first image is a lifestyle shot.
-            texts = []
-            for url in ad.image_urls[: cfg.get("max_images_per_ad", 4)]:
-                local = download_image(url, img_dir)
-                if local:
-                    if not image_file:
-                        image_file = f"images/{local.name}"  # for the HTML gallery
-                    texts.append(extract.ocr_image(str(local)))
-            ad.ocr_text = "\n".join(t for t in texts if t)
+    # --- build the target list --------------------------------------------
+    if args.keyword:
+        plan = [{"key": f"kw:{args.keyword}", "kind": "keyword",
+                 "query": args.keyword, "state": "", "category": "mixed"}]
+    elif args.advertisers:
+        pages = conn.execute(
+            "SELECT page_id, page_name FROM advertisers WHERE page_id != '' "
+            "ORDER BY last_seen DESC"
+        ).fetchall()
+        plan = targets_mod.advertiser_targets([(r["page_id"], r["page_name"])
+                                               for r in pages])
+        if not plan:
+            print("No advertisers known yet — run a keyword sweep first.")
+            conn.close()
+            return 1
+    else:
+        plan = targets_mod.keyword_targets(pilot=args.pilot)
 
-        prices = extract.extract_prices(ad.all_text)
-        caps = extract.extract_capacities(ad.all_text)
-        cmp = normalize.compare(prices, caps, rebate)
-        score = normalize.deal_score(cmp, ad.days_running)
+    store.register_targets(conn, sweep_id, plan)
+    pending = store.pending_targets(conn, sweep_id)
+    print(f"[plan] {targets_mod.summarise(plan)}")
+    print(f"[plan] {len(pending)} still to do\n")
 
-        # Real home batteries land roughly $150-$1500 / usable kWh installed.
-        # Anything outside that is almost certainly a bad price/capacity pairing.
-        flag = ""
-        if cmp.dollars_per_kwh and not (150 <= cmp.dollars_per_kwh <= 1500):
-            flag = "check-parse"
+    started = time.time()
+    aborted = False
+    try:
+        run_sweep(conn, cfg, sweep_id, pending)
+    except KeyboardInterrupt:
+        aborted = True
 
-        rows.append({
-            "page_name": ad.page_name,
-            "price_aud": cmp.price or "",
-            "capacity_kwh": cmp.capacity_kwh or "",
-            "dollars_per_kwh": cmp.dollars_per_kwh or "",
-            "flag": flag,
-            "est_rebate_aud": cmp.est_rebate or "",
-            "price_if_pre_rebate": cmp.price_if_pre_rebate or "",
-            "deal_score": score if score != float("inf") else "",
-            "status": ad.status,
-            "ended": ad.end_date.date().isoformat() if ad.end_date else "",
-            "days_running": ad.days_running if ad.days_running is not None else "",
-            "copies_running": ad.collation_count or "",
-            "all_prices_found": ",".join(str(p) for p in prices),
-            "all_kwh_found": ",".join(str(c) for c in caps),
-            "image_file": image_file,
-            "image_url": image_url,
-            "landing_url": ad.link_url,
-            "library_url": ad.library_url,
-        })
+    store.finish_sweep(conn, sweep_id, "aborted" if aborted else "done")
 
-    # 3. Sort best-deal-first (lowest $/kWh-derived score). Suspect parses sink
-    #    below clean ones; ads with no usable price go last.
-    rows.sort(key=lambda r: (r["deal_score"] == "", r["flag"] != "", r["deal_score"] or 0))
+    if not aborted and not args.no_enrich:
+        enrich.enrich_pending(conn, store, model=model)
 
-    out = HERE / cfg.get("output", "out/solar-ads.csv")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with open(out, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else ["page_name"])
-        w.writeheader()
-        w.writerows(rows)
+    print_summary(conn, sweep_id)
+    print(f"\n[time] {int(time.time() - started)}s")
 
-    print(f"[write] {len(rows)} rows -> {out}")
-    priced = [r for r in rows if r["dollars_per_kwh"] and not r["flag"]]
-    if priced:
-        print("\nTop 5 by $/usable kWh:")
-        for r in priced[:5]:
-            print(f"  {r['dollars_per_kwh']:>7} $/kWh  "
-                  f"{r['capacity_kwh']:>6} kWh  ${r['price_aud']:<7} "
-                  f"{r['page_name'][:32]:32}  ({r['days_running']}d)")
+    if args.csv:
+        out = HERE / cfg.get("output", "out/solar-ads.csv")
+        print(f"[write] {export_csv(conn, out)} rows -> {out}")
+
+    conn.close()
     return 0
 
 
