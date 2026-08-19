@@ -37,6 +37,7 @@ import { NodesPanel } from '@/components/panels/nodes-panel'
 import { ExecApprovalPanel } from '@/components/panels/exec-approval-panel'
 import { SystemMonitorPanel } from '@/components/panels/system-monitor-panel'
 import { ChatPagePanel } from '@/components/panels/chat-page-panel'
+import { SolarAdsPanel } from '@/components/panels/solar-ads-panel'
 import { ChatPanel } from '@/components/chat/chat-panel'
 import { getPluginPanel } from '@/lib/plugins'
 import { shouldRedirectDashboardToHttps } from '@/lib/browser-security'
@@ -505,6 +506,8 @@ function ContentRouter({ tab }: { tab: string }) {
       )
     case 'tasks':
       return <TaskBoardPanel />
+    case 'solar-ads':
+      return <SolarAdsPanel />
     case 'agents':
       return (
         <>

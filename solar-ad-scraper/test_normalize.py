@@ -5,6 +5,7 @@ Uses the three ads from the original screenshots as fixtures.
 """
 
 import extract
+import states
 import normalize
 
 
@@ -52,6 +53,99 @@ def test_deal_score_favours_long_running():
     fresh = normalize.deal_score(cmp, days_running=1)
     aged = normalize.deal_score(cmp, days_running=300)
     assert aged < fresh  # long-running ad scores (slightly) better
+
+
+
+# ---------------------------------------------------------------------------
+# System sizes (kW) vs capacity (kWh)
+# ---------------------------------------------------------------------------
+
+def test_kw_is_not_confused_with_kwh():
+    """The single most damaging parse error: reading a 6.6kW array as 6.6kWh
+    of storage would triple every $/kWh figure for solar ads."""
+    text = "6.6kW solar system with a 13.5kWh battery"
+    assert extract.extract_system_sizes(text) == [6.6]
+    assert extract.extract_capacities(text) == [13.5]
+
+
+def test_system_size_bounds():
+    # Residential arrays only; a 500 kW figure is commercial or a misparse.
+    assert extract.extract_system_sizes("500kW commercial") == []
+    assert extract.extract_system_sizes("10 kW system") == [10.0]
+
+
+def test_price_bands_are_per_category():
+    """A $899 headline is noise in a battery ad but real for an EV charger."""
+    assert extract.extract_prices("EV charger $899", "ev_charger") == [899]
+    assert extract.extract_prices("EV charger $899", "battery") == []
+    assert extract.extract_prices("battery $8,990", "battery") == [8990]
+
+
+def test_category_classifier():
+    assert extract.classify_category("Tesla Powerwall 13.5kWh storage") == "battery"
+    assert extract.classify_category("Rooftop solar panels + inverter") == "solar"
+    assert extract.classify_category("hot water heat pump rebate") == "heat_pump"
+    assert extract.classify_category("Home EV charger installation") == "ev_charger"
+    # A bundled mention must not hijack the primary product.
+    assert extract.classify_category(
+        "6.6kW solar system and 13.5kWh battery, free EV charger"
+    ) == "solar_battery"
+    assert extract.classify_category("Book a free consultation") == "other"
+
+
+# ---------------------------------------------------------------------------
+# State inference
+# ---------------------------------------------------------------------------
+
+def test_state_abbreviations_do_not_false_positive():
+    """'sa', 'wa', 'act' and 'nt' occur constantly inside ordinary words. If
+    lowercase matches were trusted, most of the corpus would be attributed to
+    South Australia."""
+    for text in ["Our sales team will act fast", "Full warranty included",
+                 "We want your business", "Act now, don't wait"]:
+        assert states.infer(text) == [], f"false positive on: {text}"
+
+
+def test_state_tokens_and_cities():
+    sigs = states.infer("Servicing Adelaide and regional South Australia")
+    assert {s.state for s in sigs} == {"SA"}
+    assert {s.signal for s in sigs} == {"state_token", "city"}
+    assert all(s.confidence == "high" for s in sigs)
+
+
+def test_scheme_names_are_high_confidence():
+    sigs = states.infer("Claim the Queensland Battery Booster rebate")
+    assert any(s.signal == "scheme" and s.state == "QLD" and s.confidence == "high"
+               for s in sigs)
+
+
+def test_ambiguous_area_code_emits_every_candidate():
+    """08 covers SA, WA and NT. Recording one guess would be a fabrication."""
+    sigs = [s for s in states.infer("Call us on 08 8123 4567") if s.signal == "area_code"]
+    assert {s.state for s in sigs} == {"SA", "WA", "NT"}
+    assert all(s.confidence == "medium" for s in sigs)
+
+
+def test_national_campaign_is_flagged_not_counted_everywhere():
+    """A national installer listing service areas must not read as a local
+    advertiser in eight separate markets."""
+    sigs = states.resolve(states.infer(
+        "We install across NSW, VIC, QLD, SA, WA and TAS"))
+    assert any(s.state == states.NATIONAL for s in sigs)
+    assert states.best_state(sigs)[0] == states.NATIONAL
+
+
+def test_query_provenance_is_weak_evidence_only():
+    sigs = states.infer("Great solar deal", query_state="VIC")
+    assert [(s.state, s.confidence) for s in sigs] == [("VIC", "low")]
+    # Strong copy evidence outranks the search that surfaced the ad.
+    sigs = states.infer("Adelaide install special", query_state="VIC")
+    assert states.best_state(states.resolve(sigs)) == ("SA", "high")
+
+
+def test_unknown_state_stays_unknown():
+    """An honest blank beats a fabricated attribution."""
+    assert states.best_state(states.infer("Free solar quote today")) == ("", "")
 
 
 if __name__ == "__main__":

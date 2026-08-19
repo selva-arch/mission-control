@@ -173,6 +173,11 @@ def upsert_ad(conn, ad) -> None:
     return a sparser payload cannot blank out copy we already captured.
     """
     now = int(time.time())
+    # Guarantee the advertiser row exists first. Without this the foreign key
+    # rejects the ad whenever a payload carries a page_id we have not recorded
+    # yet, silently losing the ad rather than the advertiser name.
+    if ad.page_id:
+        upsert_advertiser(conn, ad.page_id, ad.page_name)
     conn.execute(
         "INSERT INTO ads (ad_archive_id, page_id, page_name, title, body_text, "
         " caption, link_description, cta_type, cta_text, link_url, display_format, "
