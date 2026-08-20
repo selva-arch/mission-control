@@ -116,6 +116,30 @@ def test_enrichment_is_cached_by_version():
     conn.close(); os.unlink(path)
 
 
+def test_cached_ocr_is_reused_not_redone():
+    """The expensive-step guard: OCR must not re-run for a creative already
+    processed. Re-sweeps see the same ads under many search terms, and OCR
+    dominated the pilot's 54-minute runtime."""
+    conn, path = _fresh()
+    ad = list(extract.parse_ad_nodes([json.dumps(FIXTURE)]).values())[0]
+    store.upsert_ad(conn, ad)
+
+    # Never seen -> None, so the caller runs OCR.
+    assert store.get_creative_ocr(conn, "deadbeef") is None
+
+    store.upsert_creative(conn, "deadbeef", "900", local_path="x.jpg",
+                          ocr_text="13.5kWh $8,990")
+    assert store.get_creative_ocr(conn, "deadbeef") == "13.5kWh $8,990"
+
+    # An empty result is a real answer -- OCR ran and found nothing -- so it
+    # must be distinguishable from "never tried", or blank creatives get
+    # re-processed on every single sweep.
+    store.upsert_creative(conn, "cafe0000", "900", local_path="y.jpg", ocr_text="")
+    assert store.get_creative_ocr(conn, "cafe0000") == ""
+
+    conn.close(); os.unlink(path)
+
+
 def test_archive_path_is_not_the_app_database():
     """A sweep must never be able to touch mission-control.db."""
     assert store.DEFAULT_DB.name == "solar-ads.db"

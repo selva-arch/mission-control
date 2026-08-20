@@ -253,6 +253,24 @@ def upsert_creative(conn, sha1: str, ad_archive_id: str, kind: str = "image",
     )
 
 
+def get_creative_ocr(conn, sha1: str) -> str | None:
+    """Return stored OCR text for a creative, or None if it was never OCR'd.
+
+    An empty string is a meaningful answer — it means OCR ran and found no text
+    — so it is returned as-is and callers should skip re-running OCR. None means
+    no row, or a row written before OCR happened.
+
+    This is what makes re-sweeps cheap: the same ad surfaces under many search
+    terms, and OCR is the single most expensive step in a sweep.
+    """
+    row = conn.execute(
+        "SELECT ocr_text FROM creatives WHERE sha1 = ?", (sha1,)
+    ).fetchone()
+    if row is None or row["ocr_text"] is None:
+        return None
+    return row["ocr_text"]
+
+
 def record_states(conn, ad_archive_id: str, signals: list) -> None:
     """Persist every state signal that fired for an ad (see states.py)."""
     conn.executemany(

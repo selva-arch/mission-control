@@ -74,6 +74,7 @@ python run.py                # full sweep: 208 targets, several hours
 python run.py --resume       # continue an interrupted sweep
 python run.py --advertisers  # stage 2: every ad from each discovered Page
 python run.py --enrich-only  # LLM pass over already-collected ads
+python run.py --reocr        # force re-OCR (e.g. after installing Tesseract)
 python run.py --csv          # also export a flat CSV
 ```
 
@@ -83,6 +84,18 @@ every query: interrupt with Ctrl-C and pick up with `--resume`.
 
 **Start with `--pilot`.** Check the results in the dashboard before committing
 hours to a full sweep.
+
+### Sweep speed
+
+OCR dominates runtime — a 10-query pilot took 54 minutes, almost all of it on
+3,789 creatives. Two things keep the full sweep to an overnight job rather than
+a two-day one, and both are already the default:
+
+- **OCR results are cached per creative.** The same ad surfaces under many
+  search terms; its images are only ever read once. Use `--reocr` to override.
+- **`max_images_per_ad: 2`** captures the hero plus the first carousel card,
+  which is where prices almost always sit. Raise it in `config.yaml` for a
+  deeper pass over a small target list.
 
 ## What gets collected
 

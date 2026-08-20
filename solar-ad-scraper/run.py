@@ -73,7 +73,8 @@ def download_creative(url: str, dest_dir: Path) -> tuple[Path | None, str]:
         return None, sha
 
 
-def process_ad(conn, cfg: dict, sweep_id: int, ad, target) -> None:
+def process_ad(conn, cfg: dict, sweep_id: int, ad, target,
+               reocr: bool = False) -> None:
     """Persist one ad: identity, creatives+OCR, prices, and state signals."""
     category = (target["category"] if target else "") or "mixed"
 
@@ -86,7 +87,7 @@ def process_ad(conn, cfg: dict, sweep_id: int, ad, target) -> None:
     # --- creatives + OCR ---------------------------------------------------
     if cfg.get("ocr_enabled", True):
         ocr_chunks: list[str] = []
-        cap = cfg.get("max_images_per_ad", 4)
+        cap = cfg.get("max_images_per_ad", 2)
         images = ad.image_urls[:cap]
         posters = ad.video_poster_urls[:max(0, cap - len(images))]
         for url, kind in [(u, "image") for u in images] + \
@@ -94,7 +95,13 @@ def process_ad(conn, cfg: dict, sweep_id: int, ad, target) -> None:
             local, sha = download_creative(url, CREATIVES_DIR)
             if not local:
                 continue
-            text = extract.ocr_image(str(local))
+            # The same ad surfaces under many search terms, and OCR is the most
+            # expensive step in a sweep. Reuse text we already extracted for
+            # this exact creative unless a re-OCR was explicitly asked for
+            # (e.g. Tesseract was installed after an earlier sweep ran).
+            text = None if reocr else store.get_creative_ocr(conn, sha)
+            if text is None:
+                text = extract.ocr_image(str(local))
             if text:
                 ocr_chunks.append(text)
             store.upsert_creative(
@@ -155,7 +162,8 @@ def process_ad(conn, cfg: dict, sweep_id: int, ad, target) -> None:
         store.record_states(conn, ad.ad_archive_id, signals)
 
 
-def run_sweep(conn, cfg: dict, sweep_id: int, target_rows: list) -> None:
+def run_sweep(conn, cfg: dict, sweep_id: int, target_rows: list,
+              reocr: bool = False) -> None:
     """Drive the browser through every pending target, committing as we go.
 
     Each target is committed on completion so an interrupted sweep resumes
@@ -181,7 +189,7 @@ def run_sweep(conn, cfg: dict, sweep_id: int, target_rows: list) -> None:
                         target["query"], cfg.get("max_scrolls", 25))
                 ads = extract.parse_ad_nodes(bodies)
                 for ad in ads.values():
-                    process_ad(conn, cfg, sweep_id, ad, target)
+                    process_ad(conn, cfg, sweep_id, ad, target, reocr=reocr)
                 conn.commit()
                 store.finish_target(conn, sweep_id, target["target_key"], len(ads))
                 print(f"      {len(ads)} ads")
@@ -283,6 +291,9 @@ def main() -> int:
                     help="run the LLM extraction over collected ads, no scraping")
     ap.add_argument("--no-enrich", action="store_true",
                     help="skip the LLM extraction step")
+    ap.add_argument("--reocr", action="store_true",
+                    help="re-run OCR on creatives already processed "
+                         "(use after installing Tesseract)")
     ap.add_argument("--csv", action="store_true", help="also write a flat CSV")
     ap.add_argument("--db", default=None, help="override database path")
     args = ap.parse_args()
@@ -337,7 +348,7 @@ def main() -> int:
     started = time.time()
     aborted = False
     try:
-        run_sweep(conn, cfg, sweep_id, pending)
+        run_sweep(conn, cfg, sweep_id, pending, reocr=args.reocr)
     except KeyboardInterrupt:
         aborted = True
 

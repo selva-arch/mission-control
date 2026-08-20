@@ -194,8 +194,16 @@ def enrich_pending(conn, store, model: str = DEFAULT_MODEL,
             print("[enrich] nothing pending")
         return 0
     if not available():
-        print("[enrich] skipped — set ANTHROPIC_API_KEY and "
-              "`pip install anthropic` to enable structured extraction")
+        # Report the actual cause: telling someone to install a package they
+        # already have sends them the wrong way.
+        try:
+            import anthropic  # noqa: F401
+            reason = "ANTHROPIC_API_KEY is not set in this shell"
+        except ImportError:
+            reason = "the `anthropic` package is not installed (pip install anthropic)"
+        print(f"[enrich] skipped — {reason}. "
+              f"{len(rows)} ads are waiting for structured extraction; "
+              f"run `python run.py --enrich-only` once resolved.")
         return 0
 
     done = 0

@@ -26,9 +26,14 @@ headless: false
 # Download ad creative images and OCR prices baked into the graphics.
 ocr_enabled: true
 
-# How many creatives per ad to OCR. The price often sits on a later card,
-# not the first (hero) image, so OCR a few. Higher = better yield, slower.
-max_images_per_ad: 4
+# How many creatives per ad to OCR. The price often sits on a later card
+# rather than the first (hero) image, so more than one is worth reading.
+#
+# OCR is the single most expensive step in a sweep: the pilot spent most of
+# 54 minutes on 3,789 creatives. Two captures the hero plus the first carousel
+# card, which is where prices almost always are. Raise to 4 for a deeper (and
+# roughly twice as slow) pass over a small target list.
+max_images_per_ad: 2
 
 # Optional flat CSV export (written only with --csv). The archive itself lives
 # in SQLite at ../.data/solar-ads.db.
