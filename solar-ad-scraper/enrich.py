@@ -217,6 +217,15 @@ def enrich_pending(conn, store, model: str = DEFAULT_MODEL,
     for batch in _chunk(list(rows), BATCH_SIZE):
         try:
             results = enrich_batch(batch, model=model)
+        except KeyboardInterrupt:
+            # Deliberate stop: report where we got to rather than dumping a
+            # traceback. Everything already committed stays cached, so a
+            # re-run resumes here and pays nothing for completed work.
+            conn.commit()
+            print(f"\n[enrich] interrupted after {done}/{len(rows)} — "
+                  f"completed extractions are cached; "
+                  f"re-run `--enrich-only` to continue")
+            return done
         except Exception as e:
             print(f"  ! enrich batch failed: {e}")
             continue
