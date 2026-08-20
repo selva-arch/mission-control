@@ -110,7 +110,15 @@ export async function GET(request: NextRequest) {
                WHERE ad_archive_id = a.ad_archive_id AND confidence = 'high')
                AS states_high
       ${fromClause}
-      ORDER BY (p.dollars_per_kwh IS NULL), p.dollars_per_kwh, a.last_seen DESC
+      -- Suspect parses must not lead the list. A misread price (a rebate
+      -- amount, or a "scalable up to 42kWh" figure taken as the system size)
+      -- produces an implausibly low $/kWh, so a naive cheapest-first sort
+      -- surfaces precisely the rows that are wrong. Flagged rows still appear,
+      -- just below every clean reading.
+      ORDER BY (p.dollars_per_kwh IS NULL),
+               (COALESCE(p.flag, '') != ''),
+               p.dollars_per_kwh,
+               a.last_seen DESC
       LIMIT ? OFFSET ?
     `, [...params, limit, offset])
 
