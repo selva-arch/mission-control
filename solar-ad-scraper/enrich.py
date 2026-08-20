@@ -169,7 +169,14 @@ def enrich_batch(rows: list, model: str = DEFAULT_MODEL) -> list[dict]:
                 f"\n\n{payload}"
             ),
         }],
-        output_config={"format": {"type": "json_schema", "schema": RESPONSE_SCHEMA}},
+        output_config={
+            "format": {"type": "json_schema", "schema": RESPONSE_SCHEMA},
+            # Reading fields off ad copy is mechanical work, not reasoning.
+            # Left at the default effort the model deliberates over every batch,
+            # which on a few hundred batches costs real time and money for no
+            # measurable gain in extraction accuracy.
+            "effort": "low",
+        },
     )
 
     text = next((b.text for b in response.content if b.type == "text"), "")
@@ -225,5 +232,6 @@ def enrich_pending(conn, store, model: str = DEFAULT_MODEL,
             done += 1
         conn.commit()
         if verbose:
-            print(f"  [enrich] {done}/{len(rows)}")
+            pct = 100 * done // max(1, len(rows))
+            print(f"  [enrich] {done}/{len(rows)} ({pct}%)")
     return done
