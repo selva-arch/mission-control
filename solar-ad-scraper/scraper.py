@@ -102,12 +102,25 @@ class Session:
         return self
 
     def __exit__(self, *exc):
+        """Tear the browser down without ever masking why we are exiting.
+
+        Ctrl-C kills the Playwright driver subprocess before this runs, so
+        closing the context raises "Connection closed while reading from the
+        driver". Allowed to propagate, that exception *replaces* the
+        KeyboardInterrupt, so the caller's clean-shutdown path never runs and
+        the sweep is left unmarked. Teardown failures are not actionable in
+        either case, so they are swallowed.
+        """
         try:
             if self._context:
                 self._context.close()
-        finally:
+        except Exception:
+            pass
+        try:
             if self._pw:
                 self._pw.stop()
+        except Exception:
+            pass
         return False
 
     # -- internals ---------------------------------------------------------
