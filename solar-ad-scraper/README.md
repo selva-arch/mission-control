@@ -121,11 +121,51 @@ Open Mission Control and visit **`/solar-ads`** (requires Full interface mode �
 Overview (state breakdown, median $/kWh by state, product mix, signal mix),
 Ads (filterable, with creative thumbnails), Advertisers, and Sweeps.
 
+## Publishing a shareable copy
+
+`report_site.py` builds a self-contained static site from the archive — the same
+data and filters as the dashboard, but no server, no database, and a permanent
+URL. Mission Control itself cannot be hosted on a static platform: it is a Node
+server build, depends on the native better-sqlite3 addon, and serves creatives
+off local disk.
+
+```bash
+python report_site.py                  # build out/netlify/ (one thumbnail per ad)
+python report_site.py --images all     # every creative, larger upload
+python report_site.py --images none    # text only, ~2 MB
+open out/netlify/public/index.html     # preview with no server
+```
+
+Deploy to Netlify, gated by a password:
+
+```bash
+npm install -g netlify-cli && netlify login   # once
+cd out/netlify
+netlify deploy --prod                          # prints the site URL
+netlify env:set SITE_PASSWORD 'your-password'
+netlify deploy --prod                          # redeploy so the gate applies
+```
+
+The password is enforced by a Netlify **edge function**, which runs before static
+assets are served — so it covers the images too, not just the page. It **fails
+closed**: with no `SITE_PASSWORD` set the site returns 503 rather than publishing
+the archive. Verify after deploying:
+
+```bash
+curl -sI https://your-site.netlify.app | head -1                 # expect 401
+curl -sI -u :'your-password' https://your-site.netlify.app | head -1   # expect 200
+```
+
+Two things to keep in mind. The site is a **point-in-time snapshot** — re-run the
+generator and redeploy to refresh it. And it republishes advertisers' creative
+images, so keep the password on it rather than sharing the URL openly.
+
 ## Tests
 
 ```bash
 python test_normalize.py   # parsing, rebate maths, state inference (17)
-python test_store.py       # archive round-trip, history, resume (7)
+python test_store.py       # archive round-trip, history, resume (8)
+python test_site.py        # site generator, auth gate, escaping (8)
 ```
 
 ## Files
@@ -141,7 +181,7 @@ python test_store.py       # archive round-trip, history, resume (7)
 | `enrich.py` | LLM structured extraction of offer fields |
 | `store.py` | SQLite persistence, sweep lifecycle, history |
 | `schema.sql` | Archive schema |
-| `report_html.py` | Standalone HTML report (offline sharing) |
+| `report_site.py` | Build a deployable static site from the archive |
 | `usage_model.py` | Battery savings model from interval meter data |
 
 ## Caveats / fair use
