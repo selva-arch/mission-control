@@ -2,6 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
+import { SolarAdsMarket } from '@/components/panels/solar-ads-market'
+import { SolarAdsFilters, EMPTY_FILTERS, type Filters }
+  from '@/components/panels/solar-ads-filters'
 
 /**
  * Australian solar/battery advertising intelligence.
@@ -52,6 +55,9 @@ interface Ad {
   product_category: string | null
   brand: string | null
   offer_type: string | null
+  config: string | null
+  price_source: string | null
+  price_basis: string | null
   creative_sha: string | null
   creative_count: number
 }
@@ -69,7 +75,7 @@ interface Stats {
   signalMix?: Array<{ signal: string; confidence: string; n: number }>
 }
 
-type Tab = 'overview' | 'ads' | 'advertisers' | 'sweeps'
+type Tab = 'overview' | 'market' | 'ads' | 'advertisers' | 'sweeps'
 
 function fmtMoney(v: number | null | undefined, dp = 0): string {
   if (v === null || v === undefined) return '—'
@@ -88,13 +94,9 @@ export function SolarAdsPanel() {
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
 
-  const [state, setState] = useState('')
-  const [category, setCategory] = useState('')
-  const [status, setStatus] = useState('')
-  const [confidence, setConfidence] = useState('high')
-  const [pricedOnly, setPricedOnly] = useState(false)
-  const [search, setSearch] = useState('')
+  const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS)
   const [page, setPage] = useState(0)
+  const { state, category } = filters
 
   const PAGE_SIZE = 50
 
@@ -111,13 +113,14 @@ export function SolarAdsPanel() {
     setLoading(true)
     try {
       const p = new URLSearchParams({
-        limit: String(PAGE_SIZE), offset: String(page * PAGE_SIZE), confidence,
+        limit: String(PAGE_SIZE), offset: String(page * PAGE_SIZE),
       })
-      if (state) p.set('state', state)
-      if (category) p.set('category', category)
-      if (status) p.set('status', status)
-      if (pricedOnly) p.set('priced', '1')
-      if (search) p.set('q', search)
+      // Send only what differs from the defaults, so the request carries the
+      // filters actually in use rather than a predicate per untouched control.
+      for (const [k, v] of Object.entries(filters)) {
+        if (v === EMPTY_FILTERS[k as keyof Filters]) continue
+        p.set(k, v === true ? '1' : String(v))
+      }
       const r = await fetch(`/api/solar-ads?${p}`)
       const data = await r.json()
       setAds(data.ads || [])
@@ -127,11 +130,20 @@ export function SolarAdsPanel() {
     } finally {
       setLoading(false)
     }
-  }, [state, category, status, confidence, pricedOnly, search, page])
+  }, [filters, page])
 
   useEffect(() => { loadStats() }, [loadStats])
   useEffect(() => { loadAds() }, [loadAds])
-  useEffect(() => { setPage(0) }, [state, category, status, confidence, pricedOnly, search])
+  useEffect(() => { setPage(0) }, [filters])
+
+  // Dropdown options come from the loaded rows: offering a brand that matches
+  // nothing in view would be a dead end.
+  const facets = useMemo(() => ({
+    brands: [...new Set(ads.map(a => a.brand).filter(Boolean) as string[])].sort(),
+    advertisers: [...new Set(ads.map(a => a.page_name).filter(Boolean))].sort(),
+    configs: [...new Set(ads.map(a => a.config).filter(Boolean) as string[])]
+      .sort((x, y) => (parseFloat(x) || 0) - (parseFloat(y) || 0)),
+  }), [ads])
 
   const maxStateCount = useMemo(
     () => Math.max(1, ...(stats?.byState || []).map(s => s.total)),
@@ -181,7 +193,7 @@ python run.py             # full sweep (hours, resumable)`}
       </div>
 
       <div className="flex gap-1 border-b border-border">
-        {(['overview', 'ads', 'advertisers', 'sweeps'] as Tab[]).map(t => (
+        {(['overview', 'market', 'ads', 'advertisers', 'sweeps'] as Tab[]).map(t => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -331,46 +343,19 @@ python run.py             # full sweep (hours, resumable)`}
         </div>
       )}
 
+      {tab === 'market' && (
+        <SolarAdsMarket state={state} category={category} />
+      )}
+
       {tab === 'ads' && (
         <div className="space-y-3">
-          <div className="flex flex-wrap gap-2 items-center">
-            <input
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              placeholder="Search copy or advertiser…"
-              className="px-2 py-1.5 text-sm bg-background border border-border rounded flex-1 min-w-[200px]"
-            />
-            <select value={state} onChange={e => setState(e.target.value)}
-                    className="px-2 py-1.5 text-sm bg-background border border-border rounded">
-              <option value="">All states</option>
-              {STATES.map(s => <option key={s} value={s}>{s}</option>)}
-              <option value="NATIONAL">National</option>
-            </select>
-            <select value={confidence} onChange={e => setConfidence(e.target.value)}
-                    className="px-2 py-1.5 text-sm bg-background border border-border rounded"
-                    title="Minimum confidence for the state filter">
-              <option value="high">High confidence</option>
-              <option value="medium">Medium+</option>
-              <option value="low">Any evidence</option>
-            </select>
-            <select value={category} onChange={e => setCategory(e.target.value)}
-                    className="px-2 py-1.5 text-sm bg-background border border-border rounded">
-              <option value="">All products</option>
-              {Object.entries(CATEGORY_LABELS).map(([k, v]) =>
-                <option key={k} value={k}>{v}</option>)}
-            </select>
-            <select value={status} onChange={e => setStatus(e.target.value)}
-                    className="px-2 py-1.5 text-sm bg-background border border-border rounded">
-              <option value="">Any status</option>
-              <option value="active">Active</option>
-              <option value="ended">Ended</option>
-            </select>
-            <label className="flex items-center gap-1.5 text-sm">
-              <input type="checkbox" checked={pricedOnly}
-                     onChange={e => setPricedOnly(e.target.checked)} />
-              Priced only
-            </label>
-          </div>
+          <SolarAdsFilters
+            filters={filters}
+            onChange={setFilters}
+            brands={facets.brands}
+            advertisers={facets.advertisers}
+            configs={facets.configs}
+          />
 
           <div className="text-xs text-muted-foreground">
             {loading ? 'Loading…' : `${total.toLocaleString()} ads`}

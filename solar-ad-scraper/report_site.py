@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import sys
 from datetime import datetime, timezone
@@ -248,6 +249,111 @@ def copy_images(conn, ads: list[dict], out_images: Path, mode: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Market statistics. Mirrors src/app/api/solar-ads/market/route.ts — both read
+# the same `ad_market` view, and test_market.py asserts the two agree. Prices
+# stated on different rebate bases are never blended.
+# ---------------------------------------------------------------------------
+
+MIN_SAMPLE = 5
+
+BASIS_KEYS = [("post", "post_rebate"), ("pre", "pre_rebate"), ("unknown", "unknown")]
+
+
+def _median(values: list[float]):
+    if not values:
+        return None
+    s = sorted(values)
+    m = len(s) // 2
+    return s[m] if len(s) % 2 else (s[m - 1] + s[m]) / 2
+
+
+def _quartile(values: list[float], p: float):
+    s = sorted(values)
+    if len(s) < 4:
+        return None
+    i = (len(s) - 1) * p
+    lo, hi = int(i), min(int(i) + 1, len(s) - 1)
+    return s[lo] if lo == hi else s[lo] + (s[hi] - s[lo]) * (i - lo)
+
+
+def _summary(values: list[float]) -> dict:
+    vals = [v for v in values if v is not None]
+    s = sorted(vals)
+    return {
+        "n": len(s),
+        "median": _median(s),
+        "min": s[0] if s else None,
+        "max": s[-1] if s else None,
+        "q1": _quartile(s, 0.25),
+        "q3": _quartile(s, 0.75),
+        # Below the threshold this is a hint, not a market rate.
+        "indicative": 0 < len(s) < MIN_SAMPLE,
+    }
+
+
+def load_market(conn, dim: str = "kw") -> dict:
+    col = "config_kwh" if dim == "kwh" else "config_kw"
+    per = "per_kwh" if dim == "kwh" else "per_kw"
+    rows = conn.execute(f"""
+        SELECT {col} AS config, basis, price, {per} AS per_unit,
+               COALESCE(page_name, '') AS adv
+          FROM ad_market
+         WHERE {col} IS NOT NULL AND price IS NOT NULL AND suspect = 0
+    """).fetchall()
+
+    groups: dict[str, list] = {}
+    for r in rows:
+        groups.setdefault(r["config"], []).append(r)
+
+    configs = []
+    positions = []
+    for config, rs in groups.items():
+        entry = {"config": config, "total": len(rs)}
+        medians = {}
+        for key, basis in BASIS_KEYS:
+            subset = [r for r in rs if r["basis"] == basis]
+            entry[key] = {
+                "price": _summary([r["price"] for r in subset]),
+                "perUnit": _summary([r["per_unit"] for r in subset]),
+                "advertisers": len({r["adv"] for r in subset if r["adv"]}),
+            }
+            medians[basis] = entry[key]["price"]["median"]
+        configs.append(entry)
+
+        # Cheapest row per advertiser, compared against its OWN basis median.
+        best: dict[str, dict] = {}
+        for r in rs:
+            if not r["adv"]:
+                continue
+            prev = best.get(r["adv"])
+            if prev is None or r["price"] < prev["price"]:
+                best[r["adv"]] = {"adv": r["adv"], "price": r["price"],
+                                  "basis": r["basis"]}
+        for v in sorted(best.values(), key=lambda x: x["price"]):
+            med = medians.get(v["basis"])
+            key = next(k for k, b in BASIS_KEYS if b == v["basis"])
+            positions.append({
+                "config": config, **v,
+                "vsMedian": round((v["price"] - med) / med * 100) if med else None,
+                "basisN": entry[key]["price"]["n"],
+            })
+
+    configs.sort(key=lambda c: float(re.match(r"[\d.]+", c["config"]).group()
+                                    if re.match(r"[\d.]+", c["config"]) else 0))
+
+    cov = conn.execute("""
+        SELECT SUM(CASE WHEN basis != 'unknown' THEN 1 ELSE 0 END) AS known,
+               COUNT(*) AS total, SUM(suspect) AS suspect
+          FROM ad_market WHERE price IS NOT NULL
+    """).fetchone()
+
+    return {"dim": dim, "configs": configs, "positions": positions,
+            "coverage": {"known": cov["known"] or 0, "total": cov["total"] or 0,
+                         "suspect": cov["suspect"] or 0},
+            "minSample": MIN_SAMPLE}
+
+
+# ---------------------------------------------------------------------------
 # The page. Data is embedded inline rather than fetched from a separate JSON
 # file so the build opens straight from disk — browsers block fetch() on
 # file:// URLs, which would make local preview impossible.
@@ -261,41 +367,52 @@ PAGE = r"""<!DOCTYPE html>
 <meta name="robots" content="noindex, nofollow">
 <title>__TITLE__</title>
 <style>
-  :root { --line:#d0d7de; --muted:#57606a; --warn:#9a6700; --accent:#0969da; }
-  * { box-sizing: border-box; }
-  body { font: 14px/1.5 -apple-system, system-ui, sans-serif; margin:0;
-         color:#1f2328; background:#f6f8fa; }
-  header { padding:18px 22px; background:#0d1117; color:#fff; }
+  /* Ported from the dashboard's .dark "Void" tokens in src/app/globals.css so
+     the shared link and the dashboard read as one product. */
+  :root {
+    --bg:#070a0d; --card:#0e121b; --fg:#e3e8ef; --muted:#6b7789;
+    --line:#1d2430; --accent:#3fd3ee; --warn:#f0b429;
+    /* Categorical slots 1-3, dark steps. Validated with the dataviz validator
+       against #0e121b on the all-pairs list: worst CVD dE 9.4, normal-vision
+       20.9, all contrast >= 3:1. */
+    --post:#3987e5; --pre:#d95926; --unknown:#199e70;
+  }
+  * { box-sizing:border-box; }
+  body { font:14px/1.5 -apple-system, system-ui, sans-serif; margin:0;
+         color:var(--fg); background:var(--bg); }
+  header { padding:18px 22px; background:var(--card); border-bottom:1px solid var(--line); }
   header h1 { margin:0 0 4px; font-size:19px; }
-  header .sub { color:#9da7b3; font-size:13px; }
-  .caveat { background:#fff8c5; border-bottom:1px solid #d4a72c;
-            padding:10px 22px; font-size:12.5px; color:#4d3800; }
-  .caveat strong { color:#3d2e00; }
-  .tabs { display:flex; gap:2px; padding:0 22px; background:#fff;
+  header .sub { color:var(--muted); font-size:13px; }
+  .caveat { background:rgba(240,180,41,.08); border-bottom:1px solid rgba(240,180,41,.3);
+            padding:10px 22px; font-size:12.5px; color:#f3d9a0; }
+  .caveat strong { color:var(--warn); }
+  .tabs { display:flex; gap:2px; padding:0 22px; background:var(--card);
           border-bottom:1px solid var(--line); }
   .tabs button { padding:11px 15px; border:0; background:none; cursor:pointer;
                  font-size:14px; color:var(--muted); border-bottom:2px solid transparent; }
-  .tabs button.on { color:#1f2328; font-weight:600; border-bottom-color:var(--accent); }
+  .tabs button.on { color:var(--fg); font-weight:600; border-bottom-color:var(--accent); }
   .controls { display:flex; flex-wrap:wrap; gap:10px; align-items:center;
-              padding:12px 22px; background:#fff; border-bottom:1px solid var(--line); }
-  .controls input[type=text] { width:230px; padding:6px 9px; border:1px solid var(--line);
-                               border-radius:6px; font-size:13px; }
-  .controls select { padding:6px 9px; border:1px solid var(--line);
-                     border-radius:6px; font-size:13px; background:#fff; }
-  .controls label.chk { display:flex; align-items:center; gap:6px; font-size:13px; }
+              padding:12px 22px; background:var(--card); border-bottom:1px solid var(--line); }
+  .controls input[type=text] { width:230px; }
+  .controls input, .controls select {
+      padding:6px 9px; border:1px solid var(--line); border-radius:6px;
+      font-size:13px; background:var(--bg); color:var(--fg); }
+  .controls input[type=number] { width:92px; }
+  .controls label.chk { display:flex; align-items:center; gap:6px; font-size:13px;
+                        color:var(--fg); }
   .count { padding:9px 22px; color:var(--muted); font-size:13px; }
   .grid { padding:0 22px 50px; display:flex; flex-direction:column; gap:10px; }
-  .card { background:#fff; border:1px solid var(--line); border-radius:10px;
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px;
           padding:12px; display:flex; gap:13px; }
   .card img { width:104px; height:104px; object-fit:cover; border-radius:7px;
-              border:1px solid var(--line); background:#f0f0f0; flex:0 0 auto; }
-  .card .noimg { width:104px; height:104px; border-radius:7px; background:#eef1f4;
+              border:1px solid var(--line); background:#11161f; flex:0 0 auto; }
+  .card .noimg { width:104px; height:104px; border-radius:7px; background:#11161f;
                  display:flex; align-items:center; justify-content:center;
-                 color:#8c959f; font-size:11px; flex:0 0 auto; }
+                 color:var(--muted); font-size:11px; flex:0 0 auto; }
   .card .main { flex:1; min-width:0; }
   .card .adv { font-weight:600; }
   .card .meta { color:var(--muted); font-size:12px; margin-top:1px; }
-  .card .copy { color:#424a53; font-size:12.5px; margin-top:7px;
+  .card .copy { color:#aab4c2; font-size:12.5px; margin-top:7px;
                 display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical;
                 overflow:hidden; }
   .card .price { text-align:right; flex:0 0 auto; }
@@ -303,26 +420,56 @@ PAGE = r"""<!DOCTYPE html>
   .card .price .sub { color:var(--muted); font-size:12px; }
   .tags { margin-top:8px; display:flex; flex-wrap:wrap; gap:5px; }
   .tag { font-size:10.5px; padding:2px 7px; border-radius:999px;
-         background:#eef1f4; color:#424a53; }
-  .tag.state { background:#ddf4ff; color:#0550ae; }
-  .tag.weak  { background:#eef1f4; color:#8c959f; }
-  .tag.flag  { background:#fff1e5; color:var(--warn); }
+         background:#161d29; color:#9fb0c4; }
+  .tag.state { background:rgba(57,135,229,.18); color:#8dc0ff; }
+  .tag.weak  { background:#161d29; color:var(--muted); }
+  .tag.flag  { background:rgba(240,180,41,.15); color:var(--warn); }
   .tag a, .tags a { color:var(--accent); }
-  table { border-collapse:collapse; width:100%; background:#fff; }
+  a { color:var(--accent); }
+  table { border-collapse:collapse; width:100%; background:var(--card); }
   th, td { padding:9px 11px; text-align:left; border-bottom:1px solid var(--line);
            font-size:13px; }
-  th { background:#f6f8fa; font-size:12px; color:var(--muted); }
+  th { background:rgba(255,255,255,.02); font-size:12px; color:var(--muted); }
   td.num { text-align:right; font-variant-numeric:tabular-nums; }
-  .bar { height:17px; background:#ddf4ff; border-radius:3px; }
+  .bar { height:17px; background:rgba(57,135,229,.3); border-radius:3px; }
   .pane { display:none; } .pane.on { display:block; }
   .tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr));
            gap:12px; padding:16px 22px; }
-  .tile { background:#fff; border:1px solid var(--line); border-radius:10px; padding:13px; }
+  .tile { background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:13px; }
   .tile .k { color:var(--muted); font-size:12px; }
   .tile .v { font-size:24px; font-weight:600; font-variant-numeric:tabular-nums; }
   .sect { padding:0 22px 26px; }
   .sect h2 { font-size:15px; margin:14px 0 9px; }
   .foot { padding:20px 22px 60px; color:var(--muted); font-size:12px; }
+  /* Market */
+  .mkt { padding:16px 22px 50px; }
+  .mrow { background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:12px; margin-bottom:10px; }
+  .mhead { display:flex; justify-content:space-between; align-items:baseline;
+           margin-bottom:9px; flex-wrap:wrap; gap:6px; }
+  .mhead .cfg { font-size:14px; font-weight:700; }
+  .mhead .meds { display:flex; gap:13px; font-size:12px;
+                 font-variant-numeric:tabular-nums; }
+  .lane { position:relative; height:24px; border-radius:4px;
+          background:rgba(255,255,255,.03); margin-bottom:4px; }
+  .lane .iqr { position:absolute; top:0; bottom:0; border-radius:4px; opacity:.22; }
+  .lane .rng { position:absolute; top:50%; height:2px; transform:translateY(-50%);
+               border-radius:2px; opacity:.55; }
+  .lane .dot { position:absolute; top:50%; width:10px; height:10px; border-radius:50%;
+               transform:translate(-50%,-50%); box-shadow:0 0 0 2px var(--card); }
+  .lane .med { position:absolute; top:3px; bottom:3px; width:2px;
+               transform:translateX(-50%); background:var(--fg); border-radius:2px; }
+  .legend { display:flex; gap:16px; align-items:center; font-size:12px;
+            color:var(--muted); margin-bottom:12px; flex-wrap:wrap; }
+  .legend .sw { width:10px; height:10px; border-radius:50%; display:inline-block;
+                margin-right:6px; vertical-align:-1px; }
+  .seg { display:inline-flex; border:1px solid var(--line); border-radius:6px;
+         overflow:hidden; margin-right:8px; }
+  .seg button { padding:6px 12px; border:0; background:var(--card); color:var(--muted);
+                cursor:pointer; font-size:13px; }
+  .seg button.on { background:var(--accent); color:#04222a; font-weight:600; }
+  .indic { color:var(--warn); font-size:10px; }
 </style>
 </head>
 <body>
@@ -342,6 +489,7 @@ PAGE = r"""<!DOCTYPE html>
 
 <div class="tabs">
   <button data-p="overview" class="on">Overview</button>
+  <button data-p="market">Market</button>
   <button data-p="ads">Ads</button>
   <button data-p="advertisers">Advertisers</button>
 </div>
@@ -356,6 +504,35 @@ PAGE = r"""<!DOCTYPE html>
   <div class="sect">
     <h2>Product mix</h2>
     <table id="catTbl"></table>
+  </div>
+</div>
+
+<div class="pane" id="p-market">
+  <div class="mkt">
+    <div style="margin-bottom:12px">
+      <span class="seg" id="dimSeg">
+        <button data-d="kw" class="on">Solar (kW)</button>
+        <button data-d="kwh">Battery (kWh)</button>
+      </span>
+      <span class="seg" id="measSeg">
+        <button data-m="price" class="on">Total price</button>
+        <button data-m="perUnit">Per unit</button>
+      </span>
+    </div>
+    <div class="legend">
+      <span><span class="sw" style="background:var(--post)"></span>After rebate</span>
+      <span><span class="sw" style="background:var(--pre)"></span>Before rebate</span>
+      <span><span class="sw" style="background:var(--unknown)"></span>Not stated</span>
+      <span><span style="display:inline-block;width:2px;height:11px;background:var(--fg);
+        margin-right:6px;vertical-align:-1px"></span>median</span>
+    </div>
+    <p class="count" style="padding:0 0 12px" id="mktCoverage"></p>
+    <div id="mktRows"></div>
+    <p class="count" style="padding:12px 0 0">
+      Medians from fewer than <span id="minS"></span> ads are marked
+      <span class="indic">indicative</span> — a hint, not a market rate. Prices
+      quoted on different rebate bases are never averaged together.
+    </p>
   </div>
 </div>
 
@@ -431,6 +608,91 @@ document.getElementById('advTbl').innerHTML =
   '<tr><th>Advertiser</th><th class="num">Ads</th><th>States (high confidence)</th></tr>' +
   S.advertisers.map(r => `<tr><td>${esc(r.name)}</td><td class="num">${r.ads}</td>
     <td style="color:#57606a">${esc(r.states||'—')}</td></tr>`).join('');
+
+// --- Market -------------------------------------------------------------
+const MKT = D.market;
+let mDim = 'kw', mMeas = 'price';
+const BASES = [['post','After rebate','var(--post)'],
+               ['pre','Before rebate','var(--pre)'],
+               ['unknown','Not stated','var(--unknown)']];
+document.getElementById('minS').textContent = MKT.kw.minSample;
+
+function renderMarket() {
+  const M = MKT[mDim];
+  const cov = M.coverage;
+  document.getElementById('mktCoverage').innerHTML =
+    `Rebate basis is known for <strong>${cov.known.toLocaleString()}</strong> of ` +
+    `${cov.total.toLocaleString()} priced ads — the rest sit under "not stated" and ` +
+    `cannot be compared against the other two.` +
+    (cov.suspect ? ` ${cov.suspect.toLocaleString()} ads with implausible price ` +
+                   `parses are excluded from every figure here.` : '');
+
+  // One shared scale, so spreads are comparable between configurations.
+  let scale = 0;
+  M.configs.forEach(c => BASES.forEach(([k]) => {
+    const s = c[k][mMeas]; if (s.max != null) scale = Math.max(scale, s.max);
+  }));
+  scale = scale || 1;
+  const pc = v => (v / scale * 100) + '%';
+
+  document.getElementById('mktRows').innerHTML = M.configs.map(c => {
+    const meds = BASES.filter(([k]) => c[k][mMeas].n)
+      .map(([k,label,col]) => {
+        const s = c[k][mMeas];
+        return `<span style="color:${col}">${money(s.median)}` +
+               `<span style="color:var(--muted)"> (${s.n}` +
+               `${s.indicative ? ', indicative' : ''})</span></span>`;
+      }).join('');
+    const lanes = BASES.filter(([k]) => c[k][mMeas].n).map(([k,label,col]) => {
+      const s = c[k][mMeas];
+      const iqr = (s.q1 != null && s.q3 != null)
+        ? `<span class="iqr" style="left:${pc(s.q1)};width:${pc(s.q3-s.q1)};
+             background:${col}"></span>` : '';
+      const rng = (s.min != null && s.max != null)
+        ? `<span class="rng" style="left:${pc(s.min)};
+             width:${pc(Math.max(s.max-s.min,0))};background:${col}"></span>` : '';
+      const dots = [s.min, s.max].filter(v => v != null).map(v =>
+        `<span class="dot" style="left:${pc(v)};background:${col}"
+           title="${label}: ${money(v)}"></span>`).join('');
+      const med = s.median != null
+        ? `<span class="med" style="left:${pc(s.median)}"
+             title="${label} median: ${money(s.median)} (n=${s.n})"></span>` : '';
+      return `<div class="lane" title="${label}">${iqr}${rng}${dots}${med}</div>`;
+    }).join('');
+    const pos = M.positions.filter(p => p.config === c.config).map(p => {
+      const b = BASES.find(([k]) => (k==='post'&&p.basis==='post_rebate') ||
+                                    (k==='pre'&&p.basis==='pre_rebate') ||
+                                    (k==='unknown'&&p.basis==='unknown'));
+      const v = p.vsMedian == null ? '—'
+        : `<span style="color:${p.vsMedian<0?'#4ade80':p.vsMedian>0?'var(--warn)':'var(--muted)'}">` +
+          `${p.vsMedian>0?'+':''}${p.vsMedian}%</span>`;
+      return `<tr><td>${esc(p.adv)}</td><td><span class="sw"
+        style="background:${b?b[2]:'var(--muted)'};width:8px;height:8px"></span>
+        <span style="color:var(--muted)">${b?b[1]:''}</span></td>
+        <td class="num">${money(p.price)}</td><td class="num">${v}</td></tr>`;
+    }).join('');
+    return `<div class="mrow">
+      <div class="mhead">
+        <span class="cfg">${c.config}
+          <span style="font-weight:400;font-size:12px;color:var(--muted)">
+            · ${c.total} ad${c.total===1?'':'s'}</span></span>
+        <span class="meds">${meds}</span>
+      </div>
+      ${lanes}
+      <table style="margin-top:9px"><tr><th>Advertiser</th><th>Basis</th>
+        <th class="num">Price</th><th class="num">vs median</th></tr>${pos}</table>
+    </div>`;
+  }).join('') || '<p class="count">No priced ads fall into a standard configuration yet.</p>';
+}
+document.querySelectorAll('#dimSeg button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#dimSeg button').forEach(x => x.classList.remove('on'));
+  b.classList.add('on'); mDim = b.dataset.d; renderMarket();
+});
+document.querySelectorAll('#measSeg button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#measSeg button').forEach(x => x.classList.remove('on'));
+  b.classList.add('on'); mMeas = b.dataset.m; renderMarket();
+});
+renderMarket();
 
 // Filter dropdowns
 const states = [...new Set(ADS.flatMap(a => a.states).concat(
@@ -601,7 +863,9 @@ def build(db_path: str | None, out_dir: Path, images: str,
               f"does not update itself. Ad creatives remain the property of the "
               f"advertisers shown.")
 
-    payload = json.dumps({"ads": ads, "stats": stats}, separators=(",", ":"))
+    market = {"kw": load_market(conn, "kw"), "kwh": load_market(conn, "kwh")}
+    payload = json.dumps({"ads": ads, "stats": stats, "market": market},
+                         separators=(",", ":"))
     html = (PAGE
             .replace("__TITLE__", title)
             .replace("__SUBTITLE__", subtitle)

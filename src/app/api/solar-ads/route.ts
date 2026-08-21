@@ -1,16 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireRole } from '@/lib/auth'
 import { logger } from '@/lib/logger'
-import {
-  archiveExists, query, BEST_STATE_CTE, LATEST_PRICE_CTE, LATEST_SNAPSHOT_CTE,
-} from '@/lib/solar-ads-db'
+import { archiveExists, query, BEST_STATE_CTE } from '@/lib/solar-ads-db'
 
 /**
  * GET /api/solar-ads — filterable list of archived ads.
  *
- * Query params: state, category, advertiser, status (active|ended),
- * confidence (high|medium|low — minimum signal strength for the state filter),
- * priced (1 = only ads with a parsed price), q (free text), limit, offset.
+ * Price, capacity and size come from the `ad_market` view rather than being
+ * re-resolved here, so this list, the market statistics and the shareable site
+ * all agree on what a given ad offers.
+ *
+ * Filters: state, confidence, category, advertiser, brand, offerType, status,
+ * priced, hideSuspect, q, price/kw/kwh/perKw/perKwh ranges, hasFinance,
+ * hasUrgency, startedWithin, runningOver.
  */
 export async function GET(request: NextRequest) {
   const auth = requireRole(request, 'viewer')
@@ -41,23 +43,58 @@ export async function GET(request: NextRequest) {
       params.push(state, minRank)
     }
 
-    const category = sp.get('category')
-    if (category) {
-      where.push(`COALESCE(o.product_category, '') = ?`)
-      params.push(category)
+    // Simple equality filters, declared once rather than repeated inline.
+    const eq: Array<[string, string]> = [
+      ['category', 'm.category'],
+      ['brand', 'm.brand'],
+      ['offerType', 'm.offer_type'],
+      ['advertiser', 'a.page_name'],
+      ['basis', 'm.basis'],
+      ['config', 'COALESCE(m.config_kw, m.config_kwh)'],
+    ]
+    for (const [param, col] of eq) {
+      const v = sp.get(param)
+      if (v) { where.push(`${col} = ?`); params.push(v) }
     }
 
-    const advertiser = sp.get('advertiser')
-    if (advertiser) {
-      where.push(`a.page_name = ?`)
-      params.push(advertiser)
+    // Numeric ranges. Each is optional and independently applied.
+    const ranges: Array<[string, string, '>=' | '<=']> = [
+      ['priceMin', 'm.price', '>='], ['priceMax', 'm.price', '<='],
+      ['kwMin', 'm.kw', '>='],       ['kwMax', 'm.kw', '<='],
+      ['kwhMin', 'm.kwh', '>='],     ['kwhMax', 'm.kwh', '<='],
+      ['perKwMax', 'm.per_kw', '<='], ['perKwhMax', 'm.per_kwh', '<='],
+    ]
+    for (const [param, col, op] of ranges) {
+      const raw = sp.get(param)
+      if (raw === null || raw === '') continue
+      const v = Number(raw)
+      if (!Number.isFinite(v)) continue
+      where.push(`${col} ${op} ?`)
+      params.push(v)
     }
 
     const status = sp.get('status')
-    if (status === 'active') where.push(`snap.is_active = 1`)
-    if (status === 'ended') where.push(`snap.is_active = 0`)
+    if (status === 'active') where.push(`m.is_active = 1`)
+    if (status === 'ended') where.push(`m.is_active = 0`)
 
-    if (sp.get('priced') === '1') where.push(`p.price_aud IS NOT NULL`)
+    if (sp.get('priced') === '1') where.push(`m.price IS NOT NULL`)
+    if (sp.get('hideSuspect') === '1') where.push(`m.suspect = 0`)
+    if (sp.get('hasFinance') === '1') where.push(`COALESCE(m.finance_terms, '') != ''`)
+    if (sp.get('hasUrgency') === '1')
+      where.push(`COALESCE(m.urgency_tactics, '') NOT IN ('', '[]')`)
+
+    // Timing. start_date is a unix timestamp; days_running comes from the
+    // latest snapshot.
+    const startedWithin = Number(sp.get('startedWithin') || '')
+    if (Number.isFinite(startedWithin) && startedWithin > 0) {
+      where.push(`m.start_date >= ?`)
+      params.push(Math.floor(Date.now() / 1000) - startedWithin * 86400)
+    }
+    const runningOver = Number(sp.get('runningOver') || '')
+    if (Number.isFinite(runningOver) && runningOver > 0) {
+      where.push(`m.days_running >= ?`)
+      params.push(runningOver)
+    }
 
     const q = sp.get('q')
     if (q) {
@@ -68,23 +105,11 @@ export async function GET(request: NextRequest) {
 
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
 
-    // CTEs must precede SELECT, so the WITH clause and the FROM body are kept
-    // separate and composed per-query rather than concatenated blindly.
-    const withClause = `
-      WITH ${BEST_STATE_CTE}, ${LATEST_PRICE_CTE}, ${LATEST_SNAPSHOT_CTE},
-      latest_offer AS (
-        SELECT o.* FROM ad_offers o
-         WHERE o.id = (SELECT MAX(id) FROM ad_offers
-                        WHERE ad_archive_id = o.ad_archive_id)
-      )
-    `
-
+    const withClause = `WITH ${BEST_STATE_CTE}`
     const fromClause = `
       FROM ads a
-      LEFT JOIN best_state    bs   ON bs.ad_archive_id   = a.ad_archive_id
-      LEFT JOIN latest_price  p    ON p.ad_archive_id    = a.ad_archive_id
-      LEFT JOIN latest_snap   snap ON snap.ad_archive_id = a.ad_archive_id
-      LEFT JOIN latest_offer  o    ON o.ad_archive_id    = a.ad_archive_id
+      JOIN ad_market m ON m.ad_archive_id = a.ad_archive_id
+      LEFT JOIN best_state bs ON bs.ad_archive_id = a.ad_archive_id
       ${whereSql}
     `
 
@@ -97,11 +122,14 @@ export async function GET(request: NextRequest) {
              a.cta_text, a.link_url, a.display_format, a.collation_id,
              a.start_date, a.end_date,
              bs.state AS best_state, bs.conf_rank,
-             p.price_aud, p.capacity_kwh, p.system_kw, p.dollars_per_kwh,
-             p.dollars_per_kw, p.est_rebate_aud, p.flag,
-             snap.is_active, snap.collation_count, snap.days_running,
-             o.product_category, o.brand, o.offer_type, o.price_basis,
-             o.urgency_tactics, o.claimed_rebates,
+             m.price AS price_aud, m.kwh AS capacity_kwh, m.kw AS system_kw,
+             m.per_kwh AS dollars_per_kwh, m.per_kw AS dollars_per_kw,
+             m.price_source, m.basis AS price_basis, m.suspect,
+             m.is_active, m.collation_count, m.days_running,
+             m.category AS product_category, m.brand, m.offer_type,
+             m.finance_terms, m.urgency_tactics,
+             COALESCE(m.config_kw, m.config_kwh) AS config,
+             CASE WHEN m.suspect = 1 THEN 'check-parse' ELSE '' END AS flag,
              (SELECT sha1 FROM creatives WHERE ad_archive_id = a.ad_archive_id
                ORDER BY rowid LIMIT 1) AS creative_sha,
              (SELECT COUNT(*) FROM creatives WHERE ad_archive_id = a.ad_archive_id)
@@ -110,14 +138,9 @@ export async function GET(request: NextRequest) {
                WHERE ad_archive_id = a.ad_archive_id AND confidence = 'high')
                AS states_high
       ${fromClause}
-      -- Suspect parses must not lead the list. A misread price (a rebate
-      -- amount, or a "scalable up to 42kWh" figure taken as the system size)
-      -- produces an implausibly low $/kWh, so a naive cheapest-first sort
-      -- surfaces precisely the rows that are wrong. Flagged rows still appear,
-      -- just below every clean reading.
-      ORDER BY (p.dollars_per_kwh IS NULL),
-               (COALESCE(p.flag, '') != ''),
-               p.dollars_per_kwh,
+      ORDER BY (m.price IS NULL),
+               m.suspect,
+               m.per_kwh,
                a.last_seen DESC
       LIMIT ? OFFSET ?
     `, [...params, limit, offset])

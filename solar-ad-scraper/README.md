@@ -160,12 +160,39 @@ Two things to keep in mind. The site is a **point-in-time snapshot** — re-run 
 generator and redeploy to refresh it. And it republishes advertisers' creative
 images, so keep the password on it rather than sharing the URL openly.
 
+## Market rates
+
+The **Market** tab answers "what does a 6.6kW system actually go for, and where
+does each advertiser sit against that". Ads are grouped into standard Australian
+configurations (3/5/6.6/8/10/13.2/15/20kW+, 5/10/13.5/16/20/27/30kWh+) using
+contiguous tolerance bands, so a 9.4kW array counts as the 10kW class rather than
+falling through a gap.
+
+Three rules keep the figures honest:
+
+- **Rebate bases are never blended.** A pre-rebate and a post-rebate price
+  describe different things, so each gets its own median, sample size and spread.
+  Every advertiser is measured against the median for *its own* basis.
+- **Suspect parses are excluded** from all statistics, and the number excluded is
+  shown rather than quietly dropped.
+- **Medians from fewer than 5 ads are labelled indicative.**
+
+Price, capacity and size resolve through the `ad_market` view in `schema.sql`,
+which prefers the LLM's reading of an ad over the regex (the regex takes the
+largest figure present, which is how rebate amounts and "scalable up to 42kWh"
+became prices and capacities). The dashboard and the static site both query that
+view, and `test_market.py` asserts the two produce identical numbers.
+
+Basis is only known for ads the enrichment pass has processed, so run
+`--enrich-only` before relying on the pre/post split.
+
 ## Tests
 
 ```bash
 python test_normalize.py   # parsing, rebate maths, state inference (17)
 python test_store.py       # archive round-trip, history, resume (8)
 python test_site.py        # site generator, auth gate, escaping (8)
+python test_market.py      # configuration buckets, basis separation (9)
 ```
 
 ## Files

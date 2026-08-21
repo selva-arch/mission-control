@@ -183,3 +183,101 @@ CREATE INDEX IF NOT EXISTS idx_prices_ad         ON price_observations(ad_archiv
 CREATE INDEX IF NOT EXISTS idx_prices_sweep      ON price_observations(sweep_id);
 CREATE INDEX IF NOT EXISTS idx_offers_ad         ON ad_offers(ad_archive_id);
 CREATE INDEX IF NOT EXISTS idx_targets_sweep     ON sweep_targets(sweep_id, status);
+
+-- ---------------------------------------------------------------------------
+-- ad_market: the single definition of "what does this ad actually offer".
+--
+-- The dashboard is TypeScript and the shareable site is Python. Resolving the
+-- price twice, once per language, guarantees they eventually disagree — and two
+-- views of one archive that quietly contradict each other are worse than having
+-- only one. Both query this view instead.
+--
+-- DROP then CREATE, not CREATE IF NOT EXISTS: store.connect() runs this schema
+-- on every open, and IF NOT EXISTS would keep a stale definition forever on
+-- archives that already have the view.
+-- ---------------------------------------------------------------------------
+DROP VIEW IF EXISTS ad_market;
+CREATE VIEW ad_market AS
+WITH latest_price AS (
+    SELECT p.* FROM price_observations p
+     WHERE p.source = 'regex'
+       AND p.id = (SELECT MAX(id) FROM price_observations
+                    WHERE ad_archive_id = p.ad_archive_id AND source = 'regex')
+),
+latest_offer AS (
+    SELECT o.* FROM ad_offers o
+     WHERE o.id = (SELECT MAX(id) FROM ad_offers
+                    WHERE ad_archive_id = o.ad_archive_id)
+),
+latest_snap AS (
+    SELECT s.* FROM ad_snapshots s
+     WHERE s.id = (SELECT MAX(id) FROM ad_snapshots
+                    WHERE ad_archive_id = s.ad_archive_id)
+),
+resolved AS (
+    SELECT
+        a.ad_archive_id,
+        a.page_id,
+        a.page_name,
+        a.start_date,
+        -- Prefer what the model read out of the ad over what the regex guessed.
+        -- The regex takes max() of every figure present, which is why rebate
+        -- amounts and "scalable up to 42kWh" ended up as prices and capacities.
+        COALESCE(o.price_aud,    p.price_aud)    AS price,
+        COALESCE(o.capacity_kwh, p.capacity_kwh) AS kwh,
+        COALESCE(o.system_kw,    p.system_kw)    AS kw,
+        CASE WHEN o.price_aud IS NOT NULL THEN 'llm' ELSE 'regex' END AS price_source,
+        COALESCE(NULLIF(o.price_basis, ''), 'unknown') AS basis,
+        COALESCE(NULLIF(o.product_category, ''), '')   AS category,
+        COALESCE(NULLIF(o.brand, ''), '')              AS brand,
+        COALESCE(NULLIF(o.offer_type, ''), '')         AS offer_type,
+        o.finance_terms,
+        o.urgency_tactics,
+        -- Suspect only when the flagged regex reading still stands. An LLM
+        -- value supersedes the flag, because the flag described the old read.
+        CASE WHEN COALESCE(p.flag, '') != '' AND o.price_aud IS NULL
+             THEN 1 ELSE 0 END AS suspect,
+        s.is_active,
+        s.days_running,
+        s.collation_count
+      FROM ads a
+      LEFT JOIN latest_price p ON p.ad_archive_id = a.ad_archive_id
+      LEFT JOIN latest_offer o ON o.ad_archive_id = a.ad_archive_id
+      LEFT JOIN latest_snap  s ON s.ad_archive_id = a.ad_archive_id
+)
+SELECT
+    r.*,
+    -- Standard Australian residential configurations. Bands are contiguous so
+    -- every real system maps to the size a customer would call it — a 9.4kW
+    -- array is sold as "10kW". Gaps would silently drop ads from the market
+    -- medians, which matters most when the sample is thin.
+    --
+    -- 6.6kW (a 5kW inverter at 133% oversizing) and 13.5kWh (Powerwall) are the
+    -- dominant labels in this market. Outside the residential range the size is
+    -- left NULL rather than forced into a bucket it does not belong in.
+    CASE
+        WHEN r.kw IS NULL OR r.kw < 2.0 OR r.kw > 40.0 THEN NULL
+        WHEN r.kw <  4.0 THEN '3kW'
+        WHEN r.kw <  6.0 THEN '5kW'
+        WHEN r.kw <= 7.2 THEN '6.6kW'
+        WHEN r.kw <= 9.0 THEN '8kW'
+        WHEN r.kw <= 11.5 THEN '10kW'
+        WHEN r.kw <= 14.0 THEN '13.2kW'
+        WHEN r.kw <= 17.0 THEN '15kW'
+        ELSE '20kW+'
+    END AS config_kw,
+    CASE
+        WHEN r.kwh IS NULL OR r.kwh < 3.0 OR r.kwh > 60.0 THEN NULL
+        WHEN r.kwh <  7.0 THEN '5kWh'
+        WHEN r.kwh <= 11.5 THEN '10kWh'
+        WHEN r.kwh <= 14.9 THEN '13.5kWh'
+        WHEN r.kwh <= 17.5 THEN '16kWh'
+        WHEN r.kwh <= 23.0 THEN '20kWh'
+        WHEN r.kwh <= 29.0 THEN '27kWh'
+        ELSE '30kWh+'
+    END AS config_kwh,
+    CASE WHEN r.price IS NOT NULL AND r.kw  IS NOT NULL AND r.kw  > 0
+         THEN ROUND(r.price / r.kw, 1) END  AS per_kw,
+    CASE WHEN r.price IS NOT NULL AND r.kwh IS NOT NULL AND r.kwh > 0
+         THEN ROUND(r.price / r.kwh, 1) END AS per_kwh
+  FROM resolved r;
