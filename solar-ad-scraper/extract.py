@@ -35,6 +35,9 @@ class Ad:
     collation_id: str = ""
     collation_count: int | None = None
     ocr_text: str = ""
+    # Catalogue/dynamic ad: Meta returns the unrendered template rather
+    # than the copy a viewer sees.
+    is_dynamic: bool = False
 
     @property
     def library_url(self) -> str:
@@ -160,6 +163,39 @@ def _collect_video_posters(snapshot: dict) -> list[str]:
     return list(dict.fromkeys(urls))
 
 
+# Meta returns catalogue ads as unrendered templates — the stored body is
+# literally "{{product.name}} — {{product.brand}}". The copy a viewer actually
+# sees lives in the per-product cards, so a placeholder body is worthless for
+# price parsing and would feed the enrichment pass nonsense.
+PLACEHOLDER_RE = re.compile(r"\{\{\s*[\w.]+\s*\}\}")
+
+
+def is_placeholder(text: str) -> bool:
+    """True when the text is mostly unrendered template tokens.
+
+    Substituting the tokens out and checking what remains avoids flagging an ad
+    that merely mentions braces somewhere in otherwise real copy.
+    """
+    if not text or "{{" not in text:
+        return False
+    stripped = PLACEHOLDER_RE.sub("", text)
+    # Only separators left once the tokens are removed.
+    return not re.search(r"[A-Za-z0-9]", stripped)
+
+
+def _card_text(snapshot: dict) -> str:
+    """Concatenate carousel card copy — where a catalogue ad's real offer sits."""
+    parts: list[str] = []
+    for card in snapshot.get("cards") or []:
+        if not isinstance(card, dict):
+            continue
+        for key in ("title", "body", "caption", "link_description"):
+            val = _text_of(card.get(key))
+            if val and not is_placeholder(val):
+                parts.append(val)
+    return "\n".join(dict.fromkeys(parts))
+
+
 def _text_of(value) -> str:
     """Snapshot fields are sometimes a bare string, sometimes {"text": ...}."""
     if isinstance(value, dict):
@@ -194,7 +230,16 @@ def parse_ad_nodes(bodies: list[str]) -> dict[str, Ad]:
                     _first(snapshot, "page_id", "pageID")
                     or _first(node, "page_id", "pageID") or ""
                 )
-                ad.body_text = ad.body_text or _text_of(snapshot.get("body"))
+                raw_body = _text_of(snapshot.get("body"))
+                if is_placeholder(raw_body):
+                    # Keep the ad, but source its text from the cards instead of
+                    # the template. Flagged so downstream code knows the copy is
+                    # reconstructed rather than as-served.
+                    ad.is_dynamic = True
+                    fallback = _card_text(snapshot)
+                    ad.body_text = ad.body_text or fallback or raw_body
+                else:
+                    ad.body_text = ad.body_text or raw_body
                 ad.title = ad.title or _text_of(_first(snapshot, "title"))
                 ad.caption = ad.caption or _text_of(_first(snapshot, "caption"))
                 ad.link_description = ad.link_description or _text_of(

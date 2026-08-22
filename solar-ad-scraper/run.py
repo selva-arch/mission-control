@@ -24,6 +24,7 @@ import hashlib
 import json
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import yaml
@@ -191,8 +192,14 @@ def run_sweep(conn, cfg: dict, sweep_id: int, target_rows: list,
                 for ad in ads.values():
                     process_ad(conn, cfg, sweep_id, ad, target, reocr=reocr)
                 conn.commit()
-                store.finish_target(conn, sweep_id, target["target_key"], len(ads))
-                print(f"      {len(ads)} ads")
+                coverage = getattr(session, "last_scroll_outcome", "")
+                store.finish_target(conn, sweep_id, target["target_key"], len(ads),
+                                    coverage=coverage)
+                note = ""
+                if coverage == "truncated":
+                    note = (f"  ← hit the {cfg.get('max_scrolls', 25)}-scroll limit; "
+                            f"more ads exist for this query")
+                print(f"      {len(ads)} ads{note}")
             except KeyboardInterrupt:
                 conn.commit()
                 print("\n[abort] interrupted — re-run with --resume to continue")
@@ -251,6 +258,13 @@ def print_summary(conn, sweep_id: int) -> None:
     print(f"  seen this sweep   : "
           f"{scalar('SELECT COUNT(*) FROM ad_snapshots WHERE sweep_id=?', (sweep_id,))}")
 
+    truncated = conn.execute(
+        "SELECT COUNT(*) FROM sweep_targets WHERE sweep_id = ? AND coverage = 'truncated'",
+        (sweep_id,)).fetchone()[0]
+    if truncated:
+        print(f"\n  ⚠ {truncated} queries hit the scroll limit — those results are "
+              f"partial.\n    Raise max_scrolls in config.yaml and re-run to go deeper.")
+
     print("\n  high-confidence state signals:")
     for r in conn.execute(
         "SELECT state, COUNT(DISTINCT ad_archive_id) n FROM ad_states "
@@ -291,6 +305,8 @@ def main() -> int:
                     help="run the LLM extraction over collected ads, no scraping")
     ap.add_argument("--no-enrich", action="store_true",
                     help="skip the LLM extraction step")
+    ap.add_argument("--sweeps", action="store_true",
+                    help="list sweeps and their status, then exit")
     ap.add_argument("--reocr", action="store_true",
                     help="re-run OCR on creatives already processed "
                          "(use after installing Tesseract)")
@@ -303,6 +319,21 @@ def main() -> int:
     enrich_cfg = cfg.get("enrich") or {}
     model = enrich_cfg.get("model", enrich.DEFAULT_MODEL)
 
+    if args.sweeps:
+        rows = conn.execute(
+            "SELECT sweep_id, mode, status, targets_done, targets_total, ads_seen, "
+            "       started_at FROM sweeps ORDER BY sweep_id DESC LIMIT 20").fetchall()
+        print(f"{'id':>4}  {'mode':<10} {'status':<9} {'progress':<12} {'ads':>7}  started")
+        for r in rows:
+            when = datetime.fromtimestamp(r["started_at"]).strftime("%Y-%m-%d %H:%M")
+            prog = f"{r['targets_done']}/{r['targets_total']}"
+            print(f"{r['sweep_id']:>4}  {r['mode']:<10} {r['status']:<9} {prog:<12} "
+                  f"{r['ads_seen']:>7}  {when}")
+        print("\nA sweep left at 'running' was interrupted; --resume picks up the "
+              "newest one matching the mode you ask for.")
+        conn.close()
+        return 0
+
     # --- enrichment-only path ---------------------------------------------
     if args.enrich_only:
         n = enrich.enrich_pending(conn, store, model=model)
@@ -314,7 +345,10 @@ def main() -> int:
     mode = "pilot" if args.pilot else ("advertiser" if args.advertisers else "full")
     sweep_id = None
     if args.resume:
-        sweep_id = store.latest_unfinished_sweep(conn)
+        # Match the mode being run. Without this an abandoned sweep left marked
+        # running — an interrupted pilot, say — would be resumed instead of the
+        # advertiser sweep actually being asked for.
+        sweep_id = store.latest_unfinished_sweep(conn, mode)
         if sweep_id:
             print(f"[resume] continuing sweep {sweep_id}")
         else:

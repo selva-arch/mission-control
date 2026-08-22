@@ -49,8 +49,25 @@ def connect(db_path: str | Path | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 5000")
     conn.executescript(SCHEMA.read_text())
+    _ensure_columns(conn)
     conn.commit()
     return conn
+
+
+# Columns added after the first archives were built. CREATE TABLE IF NOT EXISTS
+# will not add them to an existing database, so they are applied here instead;
+# this keeps a months-old archive usable without a rebuild.
+_ADDED_COLUMNS = [
+    ("sweep_targets", "coverage", "TEXT"),
+    ("ads", "is_dynamic", "INTEGER NOT NULL DEFAULT 0"),
+]
+
+
+def _ensure_columns(conn) -> None:
+    for table, column, decl in _ADDED_COLUMNS:
+        existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 # ---------------------------------------------------------------------------
@@ -128,11 +145,18 @@ def start_target(conn, sweep_id: int, target_key: str) -> None:
 
 
 def finish_target(conn, sweep_id: int, target_key: str, ads_found: int = 0,
-                  status: str = "done", error: str = "") -> None:
+                  status: str = "done", error: str = "",
+                  coverage: str = "") -> None:
+    """Record a target's outcome.
+
+    `coverage` is 'exhausted' or 'truncated' — whether the query ran out of
+    results or ran out of scroll budget. Without it a partial capture is
+    indistinguishable from a complete one.
+    """
     conn.execute(
         "UPDATE sweep_targets SET status = ?, ads_found = ?, error = ?, "
-        "finished_at = ? WHERE sweep_id = ? AND target_key = ?",
-        (status, ads_found, error, int(time.time()), sweep_id, target_key),
+        "coverage = ?, finished_at = ? WHERE sweep_id = ? AND target_key = ?",
+        (status, ads_found, error, coverage, int(time.time()), sweep_id, target_key),
     )
     conn.commit()
 
@@ -182,8 +206,8 @@ def upsert_ad(conn, ad) -> None:
         "INSERT INTO ads (ad_archive_id, page_id, page_name, title, body_text, "
         " caption, link_description, cta_type, cta_text, link_url, display_format, "
         " publisher_platforms, collation_id, start_date, end_date, ocr_text, "
-        " first_seen, last_seen) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+        " is_dynamic, first_seen, last_seen) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
         "ON CONFLICT(ad_archive_id) DO UPDATE SET "
         "  page_id             = COALESCE(NULLIF(excluded.page_id, ''), page_id), "
         "  page_name           = COALESCE(NULLIF(excluded.page_name, ''), page_name), "
@@ -200,6 +224,7 @@ def upsert_ad(conn, ad) -> None:
         "  start_date          = COALESCE(excluded.start_date, start_date), "
         "  end_date            = COALESCE(excluded.end_date, end_date), "
         "  ocr_text            = COALESCE(NULLIF(excluded.ocr_text, ''), ocr_text), "
+        "  is_dynamic          = excluded.is_dynamic, "
         "  last_seen           = excluded.last_seen",
         (
             ad.ad_archive_id, ad.page_id, ad.page_name, ad.title, ad.body_text,
@@ -208,7 +233,7 @@ def upsert_ad(conn, ad) -> None:
             ad.collation_id,
             int(ad.start_date.timestamp()) if ad.start_date else None,
             int(ad.end_date.timestamp()) if ad.end_date else None,
-            ad.ocr_text, now, now,
+            ad.ocr_text, int(bool(getattr(ad, 'is_dynamic', False))), now, now,
         ),
     )
 

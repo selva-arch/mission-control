@@ -86,6 +86,8 @@ class Session:
         self._context = None
         self._page = None
         self._last_query_at = 0.0
+        # How the last query ended: 'exhausted' or 'truncated'.
+        self.last_scroll_outcome = ""
 
     def __enter__(self):
         from playwright.sync_api import sync_playwright
@@ -159,7 +161,7 @@ class Session:
                 _wait_for_results(page, timeout_s=180)
 
             _wait_for_results(page, timeout_s=30)
-            _scroll_to_load(page, max_scrolls)
+            self.last_scroll_outcome = _scroll_to_load(page, max_scrolls)
             page.wait_for_timeout(1500)
         finally:
             page.remove_listener("response", on_response)
@@ -189,8 +191,16 @@ def _wait_for_results(page, timeout_s: int) -> None:
         page.wait_for_timeout(1000)
 
 
-def _scroll_to_load(page, max_scrolls: int) -> None:
+def _scroll_to_load(page, max_scrolls: int) -> str:
     """Scroll to the bottom repeatedly to trigger lazy-loaded result batches.
+
+    Returns "exhausted" if the page stopped growing (every result loaded) or
+    "truncated" if it was still growing when the scroll budget ran out.
+
+    Reporting which happened matters: the two look identical in the ad counts,
+    so a query that silently stopped early is indistinguishable from complete
+    coverage — and a sweep that quietly captured half the market is worse than
+    one that says it did.
 
     Delays are jittered rather than fixed: a metronome-regular 1800 ms scroll is
     both a fingerprint and harder on the endpoint than a human reading pace.
@@ -205,5 +215,6 @@ def _scroll_to_load(page, max_scrolls: int) -> None:
             page.wait_for_timeout(random.randint(1200, 2200))
             height = page.evaluate("document.body.scrollHeight")
             if height == last_height:
-                break
+                return "exhausted"
         last_height = height
+    return "truncated"

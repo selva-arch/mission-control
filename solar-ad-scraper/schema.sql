@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS sweep_targets (
     category     TEXT,              -- battery | solar | ev_charger | heat_pump | mixed
     status       TEXT NOT NULL DEFAULT 'pending',  -- pending | done | failed
     ads_found    INTEGER DEFAULT 0,
+    coverage     TEXT,              -- exhausted | truncated
     error        TEXT,
     started_at   INTEGER,
     finished_at  INTEGER,
@@ -69,6 +70,7 @@ CREATE TABLE IF NOT EXISTS ads (
     start_date          INTEGER,
     end_date            INTEGER,
     ocr_text            TEXT,          -- concatenated OCR across creatives
+    is_dynamic          INTEGER NOT NULL DEFAULT 0,  -- catalogue ad: body is a template
     first_seen          INTEGER NOT NULL DEFAULT (unixepoch()),
     last_seen           INTEGER NOT NULL DEFAULT (unixepoch())
 );
@@ -233,9 +235,12 @@ resolved AS (
         COALESCE(NULLIF(o.offer_type, ''), '')         AS offer_type,
         o.finance_terms,
         o.urgency_tactics,
-        -- Suspect only when the flagged regex reading still stands. An LLM
-        -- value supersedes the flag, because the flag described the old read.
-        CASE WHEN COALESCE(p.flag, '') != '' AND o.price_aud IS NULL
+        a.is_dynamic,
+        -- Suspect when the flagged regex reading still stands, or when a
+        -- catalogue ad's copy never resolved to anything real. An LLM value
+        -- supersedes both, because the flag described the old read.
+        CASE WHEN o.price_aud IS NULL
+                  AND (COALESCE(p.flag, '') != '' OR a.is_dynamic = 1)
              THEN 1 ELSE 0 END AS suspect,
         s.is_active,
         s.days_running,

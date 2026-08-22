@@ -73,6 +73,12 @@ interface Stats {
   topAdvertisers?: Array<{ page_name: string; ads: number; active: number; states: string | null }>
   sweeps?: Array<{ sweep_id: number; started_at: number; finished_at: number | null; mode: string; status: string; targets_total: number; targets_done: number; ads_seen: number }>
   signalMix?: Array<{ signal: string; confidence: string; n: number }>
+  facets?: {
+    advertisers: Array<{ name: string; ads: number }>
+    brands: string[]
+    configs: string[]
+    offerTypes: string[]
+  }
 }
 
 type Tab = 'overview' | 'market' | 'ads' | 'advertisers' | 'sweeps'
@@ -136,14 +142,15 @@ export function SolarAdsPanel() {
   useEffect(() => { loadAds() }, [loadAds])
   useEffect(() => { setPage(0) }, [filters])
 
-  // Dropdown options come from the loaded rows: offering a brand that matches
-  // nothing in view would be a dead end.
+  // Options span the whole archive, not the current page. Deriving them from
+  // the loaded rows meant any advertiser past the first 50 was unselectable
+  // even though its ads were in the database.
   const facets = useMemo(() => ({
-    brands: [...new Set(ads.map(a => a.brand).filter(Boolean) as string[])].sort(),
-    advertisers: [...new Set(ads.map(a => a.page_name).filter(Boolean))].sort(),
-    configs: [...new Set(ads.map(a => a.config).filter(Boolean) as string[])]
-      .sort((x, y) => (parseFloat(x) || 0) - (parseFloat(y) || 0)),
-  }), [ads])
+    brands: stats?.facets?.brands ?? [],
+    advertisers: (stats?.facets?.advertisers ?? []).map(a => a.name),
+    advertiserCounts: stats?.facets?.advertisers ?? [],
+    configs: stats?.facets?.configs ?? [],
+  }), [stats])
 
   const maxStateCount = useMemo(
     () => Math.max(1, ...(stats?.byState || []).map(s => s.total)),
@@ -354,6 +361,7 @@ python run.py             # full sweep (hours, resumable)`}
             onChange={setFilters}
             brands={facets.brands}
             advertisers={facets.advertisers}
+            advertiserCounts={facets.advertiserCounts}
             configs={facets.configs}
           />
 

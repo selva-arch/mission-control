@@ -186,6 +186,42 @@ view, and `test_market.py` asserts the two produce identical numbers.
 Basis is only known for ads the enrichment pass has processed, so run
 `--enrich-only` before relying on the pre/post split.
 
+## Coverage: why keyword sweeps are not enough
+
+Ad Library keyword search matches ad **text**. An advertiser running video or
+brand ads — "a clean, green future", "new innovations from All Energy" — matches
+none of the product keywords, so no keyword pass will ever return them. NRG Solar
+had 2 ads captured against ~41 in the library for exactly this reason.
+
+**`--advertisers` is the completeness mechanism.** It opens each discovered Page's
+full ad list (`view_all_page_id`) and captures everything, regardless of wording.
+Run it after a keyword sweep has discovered who the advertisers are:
+
+```bash
+python run.py --sweeps                             # sweep history and status
+caffeinate -i python run.py --advertisers          # start (3-5 min per Page)
+caffeinate -i python run.py --advertisers --resume # continue on later nights
+```
+
+`caffeinate` keeps the Mac awake; without it a sleeping laptop silently stretches
+an overnight run across days. `--resume` matches the mode you ask for, so an
+abandoned pilot cannot hijack an advertiser sweep.
+
+Before committing hours, check how many Pages can actually be swept — a Page
+without an id is skipped:
+
+```bash
+sqlite3 ../.data/solar-ads.db \
+  "SELECT COUNT(*) advertisers, SUM(page_id != '') sweepable FROM advertisers;"
+```
+
+Two related honesty features. A query that stops because it hit `max_scrolls`
+rather than running out of results is recorded as `truncated` and reported in the
+sweep summary — silent truncation looks exactly like complete coverage. And
+**catalogue ads** whose body is an unrendered template (`{{product.name}}`) are
+flagged `is_dynamic`; their copy is recovered from the carousel cards, and any
+that never resolve to a real price stay out of the market statistics.
+
 ## Tests
 
 ```bash
@@ -193,6 +229,7 @@ python test_normalize.py   # parsing, rebate maths, state inference (17)
 python test_store.py       # archive round-trip, history, resume (8)
 python test_site.py        # site generator, auth gate, escaping (8)
 python test_market.py      # configuration buckets, basis separation (9)
+python test_coverage.py    # catalogue ads, truncation, migration (8)
 ```
 
 ## Files

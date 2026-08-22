@@ -113,9 +113,32 @@ export async function GET(request: NextRequest) {
         FROM ad_states GROUP BY signal, confidence ORDER BY n DESC
     `)
 
+    // Filter options must span the whole archive. Deriving them from the
+    // current page of results hides every advertiser outside it — which is how
+    // a Page with ads in the database still went missing from the dropdown.
+    const facets = {
+      advertisers: query<{ name: string; ads: number }>(`
+        SELECT page_name AS name, COUNT(*) AS ads FROM ads
+         WHERE COALESCE(page_name, '') != ''
+         GROUP BY page_name ORDER BY ads DESC, name
+      `),
+      brands: query<{ name: string }>(`
+        SELECT DISTINCT brand AS name FROM ad_market
+         WHERE COALESCE(brand, '') != '' ORDER BY name
+      `).map(r => r.name),
+      configs: query<{ name: string }>(`
+        SELECT DISTINCT COALESCE(config_kw, config_kwh) AS name FROM ad_market
+         WHERE COALESCE(config_kw, config_kwh) IS NOT NULL
+      `).map(r => r.name).sort((a, b) => (parseFloat(a) || 0) - (parseFloat(b) || 0)),
+      offerTypes: query<{ name: string }>(`
+        SELECT DISTINCT offer_type AS name FROM ad_market
+         WHERE COALESCE(offer_type, '') != '' ORDER BY name
+      `).map(r => r.name),
+    }
+
     return NextResponse.json({
       archiveReady: true, totals, byState, nationalCount, unattributed,
-      byCategory, priceByState, topAdvertisers, sweeps, signalMix,
+      byCategory, priceByState, topAdvertisers, sweeps, signalMix, facets,
     })
   } catch (error) {
     logger.error({ err: error }, 'GET /api/solar-ads/stats failed')

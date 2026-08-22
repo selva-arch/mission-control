@@ -65,12 +65,13 @@ const SECTIONS = {
 const isSet = (v: unknown) => v !== '' && v !== false && v !== undefined && v !== null
 
 export function SolarAdsFilters({
-  filters, onChange, brands, advertisers, configs,
+  filters, onChange, brands, advertisers, advertiserCounts, configs,
 }: {
   filters: Filters
   onChange: (next: Filters) => void
   brands: string[]
   advertisers: string[]
+  advertiserCounts?: Array<{ name: string; ads: number }>
   configs: string[]
 }) {
   const [open, setOpen] = useState<string | null>(null)
@@ -205,8 +206,13 @@ export function SolarAdsFilters({
                         bg-card text-sm">
           <select value={filters.advertiser} onChange={e => set('advertiser', e.target.value)}
                   className={select}>
-            <option value="">Any advertiser</option>
-            {advertisers.map(a => <option key={a} value={a}>{a}</option>)}
+            <option value="">Any advertiser ({advertisers.length})</option>
+            {(advertiserCounts?.length ? advertiserCounts : advertisers.map(name => ({ name, ads: 0 })))
+              .map(a => (
+                <option key={a.name} value={a.name}>
+                  {a.name}{a.ads ? ` (${a.ads})` : ''}
+                </option>
+              ))}
           </select>
           <select value={filters.brand} onChange={e => set('brand', e.target.value)}
                   className={select}>
