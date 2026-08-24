@@ -186,6 +186,37 @@ CREATE INDEX IF NOT EXISTS idx_prices_sweep      ON price_observations(sweep_id)
 CREATE INDEX IF NOT EXISTS idx_offers_ad         ON ad_offers(ad_archive_id);
 CREATE INDEX IF NOT EXISTS idx_targets_sweep     ON sweep_targets(sweep_id, status);
 
+-- One row per submitted Message Batch. Recovery is by absence (an ad with no
+-- ad_offers row is simply still pending) rather than a custom_id->ad mapping,
+-- so this table only needs enough to know whether a batch is still open and
+-- what model it used.
+CREATE TABLE IF NOT EXISTS enrich_batches (
+    batch_id      TEXT PRIMARY KEY,
+    model         TEXT,
+    submitted_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+    fetched_at    INTEGER,
+    request_count INTEGER,
+    status        TEXT NOT NULL DEFAULT 'submitted',  -- submitted | done
+    succeeded     INTEGER,
+    errored       INTEGER
+);
+
+-- Fable 5 audit verdicts on the extractions in ad_offers. A separate table
+-- rather than another ad_offers row: an audit verdict (confirmed/wrong + which
+-- fields) is a different shape from an offer extraction, not a competing
+-- reading of the same fields.
+CREATE TABLE IF NOT EXISTS enrich_audits (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    ad_archive_id  TEXT NOT NULL REFERENCES ads(ad_archive_id),
+    audit_version  TEXT NOT NULL,
+    model          TEXT,
+    verdict        TEXT NOT NULL,      -- confirmed | wrong
+    wrong_fields   TEXT,               -- JSON array, empty when confirmed
+    note           TEXT,
+    created_at     INTEGER NOT NULL DEFAULT (unixepoch()),
+    UNIQUE (ad_archive_id, audit_version)
+);
+
 -- ---------------------------------------------------------------------------
 -- ad_market: the single definition of "what does this ad actually offer".
 --

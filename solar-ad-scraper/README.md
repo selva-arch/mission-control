@@ -186,6 +186,59 @@ view, and `test_market.py` asserts the two produce identical numbers.
 Basis is only known for ads the enrichment pass has processed, so run
 `--enrich-only` before relying on the pre/post split.
 
+## Bulk enrichment (thousands of ads)
+
+`--enrich-only` runs synchronously, one request at a time — fine for a few
+hundred ads, wrong for a full sweep (a 25k-ad archive means ~3,100 requests;
+sequentially that's most of a day, machine awake throughout). For anything
+past a few hundred pending ads, use the Message Batches API instead:
+
+```bash
+python run.py --enrich-submit          # seconds — submits everything pending
+# ... batch runs server-side, usually well within an hour, up to 24h ...
+python run.py --enrich-fetch           # collect results once it has finished
+```
+
+Half the price of the synchronous path, and the machine can sleep in between —
+no `caffeinate` needed for this step. `--enrich-submit` refuses to run while a
+batch is still open, so ads are never double-submitted; anything from a failed
+request or a malformed response is simply still missing an extraction and gets
+picked up automatically the next time you submit. Model comes from
+`config.yaml` (`enrich.model`, default `claude-sonnet-5` — bulk extraction
+from ad copy is mostly transcription, and a stronger model buys little here).
+
+### Auditing the extraction — `claude-fable-5`
+
+Bulk extraction is cheap and mostly right, but it is worth adversarially
+checking rather than trusting blindly — a wrong `price_basis` corrupts the
+Market tab's pre/post-rebate split silently. After a bulk pass:
+
+```bash
+python run.py --enrich-audit           # checks 200 ads by default
+python run.py --enrich-audit 500       # or a specific sample size
+```
+
+Fable 5 is given each ad's copy alongside its stored extraction and asked to
+find mistakes, specifically: a finance repayment or rebate amount read as the
+price, an inverted rebate basis, kW/kWh confusion, or a fabricated brand. The
+sample is weighted toward priced ads (what the Market tab actually reads),
+spread across rebate basis, and skews toward catalogue/dynamic ads, since their
+recovered copy is the least reliable input the extraction saw.
+
+Verdicts are stored separately from the extraction itself (`enrich_audits`,
+never overwriting `ad_offers`) and reported as a per-field error rate:
+
+```
+  field error rates (of ads where that field was populated):
+    price_basis             23/200  (12%) ⚠ re-run this slice
+    brand                    4/180  ( 2%)
+```
+
+**The rule the report states explicitly: any field wrong more than 5% of the
+time means re-running that slice on a stronger model** (clear the relevant
+`ad_offers` rows, then `--enrich-submit` again); under 5%, the bulk pass is
+trustworthy as-is.
+
 ## Coverage: why keyword sweeps are not enough
 
 Ad Library keyword search matches ad **text**. An advertiser running video or
@@ -230,6 +283,7 @@ python test_store.py       # archive round-trip, history, resume (8)
 python test_site.py        # site generator, auth gate, escaping (8)
 python test_market.py      # configuration buckets, basis separation (9)
 python test_coverage.py    # catalogue ads, truncation, migration (8)
+python test_enrich_batch.py # batch submit/fetch, Fable 5 audit (10)
 ```
 
 ## Files

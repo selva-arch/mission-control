@@ -360,6 +360,47 @@ def record_offer(conn, ad_archive_id: str, enrich_version: str, model: str,
     )
 
 
+def record_enrich_batch(conn, batch_id: str, request_count: int,
+                        status: str, model: str = "") -> None:
+    conn.execute(
+        "INSERT INTO enrich_batches (batch_id, model, request_count, status) "
+        "VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(batch_id) DO UPDATE SET status = excluded.status",
+        (batch_id, model, request_count, status),
+    )
+    conn.commit()
+
+
+def finish_enrich_batch(conn, batch_id: str, succeeded: int, errored: int) -> None:
+    conn.execute(
+        "UPDATE enrich_batches SET status = 'done', fetched_at = ?, "
+        " succeeded = ?, errored = ? WHERE batch_id = ?",
+        (int(time.time()), succeeded, errored, batch_id),
+    )
+    conn.commit()
+
+
+def latest_enrich_batch(conn, open_only: bool = False):
+    sql = "SELECT * FROM enrich_batches"
+    if open_only:
+        sql += " WHERE status != 'done'"
+    sql += " ORDER BY submitted_at DESC LIMIT 1"
+    return conn.execute(sql).fetchone()
+
+
+def record_audit(conn, ad_archive_id: str, audit_version: str, model: str,
+                 verdict: str, wrong_fields: list, note: str = "") -> None:
+    conn.execute(
+        "INSERT INTO enrich_audits (ad_archive_id, audit_version, model, "
+        " verdict, wrong_fields, note) VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(ad_archive_id, audit_version) DO UPDATE SET "
+        "  model = excluded.model, verdict = excluded.verdict, "
+        "  wrong_fields = excluded.wrong_fields, note = excluded.note",
+        (ad_archive_id, audit_version, model, verdict,
+         json.dumps(wrong_fields or []), note),
+    )
+
+
 def ads_needing_enrichment(conn, enrich_version: str, limit: int | None = None) -> list[sqlite3.Row]:
     sql = (
         "SELECT a.ad_archive_id, a.page_name, a.title, a.body_text, a.caption, "

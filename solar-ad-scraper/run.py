@@ -302,7 +302,19 @@ def main() -> int:
     ap.add_argument("--advertisers", action="store_true",
                     help="sweep every ad from each discovered advertiser Page")
     ap.add_argument("--enrich-only", action="store_true",
-                    help="run the LLM extraction over collected ads, no scraping")
+                    help="run the LLM extraction synchronously, no scraping "
+                         "(fine for a few hundred ads; use --enrich-submit "
+                         "for a full sweep)")
+    ap.add_argument("--enrich-submit", action="store_true",
+                    help="submit every pending ad as one Message Batch "
+                         "(async, ~50%% cheaper, no need to keep this machine "
+                         "running — collect later with --enrich-fetch)")
+    ap.add_argument("--enrich-fetch", action="store_true",
+                    help="collect results for the open batch, if it has finished")
+    ap.add_argument("--enrich-audit", nargs="?", type=int, const=-1, default=None,
+                    metavar="N",
+                    help="adversarially check a sample of extractions on "
+                         "claude-fable-5 (default from config.yaml, else 200)")
     ap.add_argument("--no-enrich", action="store_true",
                     help="skip the LLM extraction step")
     ap.add_argument("--sweeps", action="store_true",
@@ -318,6 +330,8 @@ def main() -> int:
     conn = store.connect(args.db)
     enrich_cfg = cfg.get("enrich") or {}
     model = enrich_cfg.get("model", enrich.DEFAULT_MODEL)
+    audit_model = enrich_cfg.get("audit_model", "claude-fable-5")
+    audit_sample = enrich_cfg.get("audit_sample", 200)
 
     if args.sweeps:
         rows = conn.execute(
@@ -334,10 +348,26 @@ def main() -> int:
         conn.close()
         return 0
 
-    # --- enrichment-only path ---------------------------------------------
+    # --- enrichment paths ---------------------------------------------------
     if args.enrich_only:
         n = enrich.enrich_pending(conn, store, model=model)
         print(f"[enrich] {n} ads enriched")
+        conn.close()
+        return 0
+
+    if args.enrich_submit:
+        enrich.submit_batch(conn, store, model=model)
+        conn.close()
+        return 0
+
+    if args.enrich_fetch:
+        enrich.fetch_batch(conn, store)
+        conn.close()
+        return 0
+
+    if args.enrich_audit is not None:
+        n = audit_sample if args.enrich_audit == -1 else args.enrich_audit
+        enrich.run_audit(conn, store, n=n, model=audit_model)
         conn.close()
         return 0
 

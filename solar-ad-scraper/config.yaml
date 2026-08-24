@@ -45,9 +45,16 @@ output: out/solar-ads.csv
 # Requires ANTHROPIC_API_KEY and `pip install anthropic`; skipped without them.
 # ---------------------------------------------------------------------------
 enrich:
-  # Accuracy matters most here — this step decides what the dashboard reports.
-  # claude-sonnet-5 or claude-haiku-4-5 are cheaper for large bulk passes.
-  model: claude-opus-5
+  # Bulk extraction from ad copy is mostly transcription (read the stated
+  # price, capacity, category) rather than reasoning, and the pilot showed
+  # low-effort extraction quality holds up well even on a cheaper model.
+  # Sonnet handles the full sweep via --enrich-submit/--enrich-fetch (the
+  # Message Batches API, ~50% off); --enrich-audit then adversarially checks
+  # a sample on claude-fable-5 for the failure modes that would corrupt the
+  # Market tab (rebate amounts read as prices, wrong pre/post basis).
+  model: claude-sonnet-5
+  audit_model: claude-fable-5
+  audit_sample: 200
 
 # Federal rebate model (Cheaper Home Batteries Program, from 1 May 2026).
 # Used to estimate the post-rebate price when an ad shows a pre-rebate figure.
