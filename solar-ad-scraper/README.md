@@ -186,6 +186,50 @@ view, and `test_market.py` asserts the two produce identical numbers.
 Basis is only known for ads the enrichment pass has processed, so run
 `--enrich-only` before relying on the pre/post split.
 
+## Competitor watchlist
+
+`watchlist.yaml` names the advertisers worth tracking individually, classified by
+what they actually sell:
+
+```yaml
+installers:    [PSC Energy, Solaray Energy, RACV Solar]
+manufacturers: [SunPower, JinkoSolar, WINAICO, Clenergy]
+platforms:     [SolarQuotes, Solar Analytics, Brighte]
+```
+
+The type is not cosmetic. **Only installers sell an installed system to a
+homeowner**, so only their prices belong in the Market tab's medians. A panel
+maker's brand ad ($22,000 for premium-tier panels) or a lead-gen site's teaser
+($2,000 "quotes from") would wreck a $/kW median while looking perfectly
+plausible in the data.
+
+```bash
+python run.py --watchlist-sync              # match + classify, no API cost
+python run.py --enrich-submit --watchlist   # enrich only these advertisers
+python run.py --enrich-fetch
+```
+
+`--watchlist-sync` matches the yaml names against the archive and prints what
+each one resolved to, with ad counts — and **names anything that matched
+nothing**. A global brand running no AU ads is expected; a missing local
+competitor means the sweep has a gap worth investigating before you spend
+anything.
+
+Matching is loose enough to bridge Instagram handles and Facebook Page names
+(`racv_solar` → `RACV Solar`, `JinkoSolar` → `JinkoSolar Australia`) but aligns
+on whole words, so a short brand name cannot swallow a longer unrelated one —
+`Brighte` does not match `Brighter Solar Solutions`.
+
+**Important nuance in the exclusion:** the medians exclude *known* non-installers
+rather than including *only known* installers. Barely a dozen of 700+ advertisers
+are classified, so the latter would collapse the market to a handful. Excluded
+ads stay fully browsable — they are just kept out of the price statistics, and
+the count excluded is stated on the Market tab rather than dropped silently.
+
+In the dashboard: a **Watchlist only** toggle under the Advertiser filter, and a
+colour-coded type badge on each ad card so a manufacturer's brand ad is never
+mistaken for a competitor's offer.
+
 ## Bulk enrichment (thousands of ads)
 
 `--enrich-only` runs synchronously, one request at a time — fine for a few
@@ -284,6 +328,7 @@ python test_site.py        # site generator, auth gate, escaping (8)
 python test_market.py      # configuration buckets, basis separation (9)
 python test_coverage.py    # catalogue ads, truncation, migration (8)
 python test_enrich_batch.py # batch submit/fetch, Fable 5 audit (10)
+python test_watchlist.py   # matching precision, type-aware medians (11)
 ```
 
 ## Files

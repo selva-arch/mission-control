@@ -211,6 +211,83 @@ def run_sweep(conn, cfg: dict, sweep_id: int, target_rows: list,
                 print(f"      ! failed: {e}")
 
 
+def sync_watchlist(conn, path: Path, verbose: bool = True) -> dict:
+    """Match watchlist.yaml entries against the archive and classify them.
+
+    Returns a summary dict. The report is the point of this command: it runs
+    before any money is spent on enrichment, and an entry that matched nothing
+    is named rather than silently skipped — a global brand may run no AU ads at
+    all, but a missing local competitor means the sweep has a gap.
+    """
+    if not path.exists():
+        print(f"[watchlist] {path} not found")
+        return {}
+
+    with open(path) as f:
+        spec = yaml.safe_load(f) or {}
+
+    # Section name -> the singular type stored per advertiser.
+    types = {"installers": "installer", "manufacturers": "manufacturer",
+             "platforms": "platform"}
+
+    store.clear_watchlist(conn)
+    matched, unmatched = {}, []
+    for section, advertiser_type in types.items():
+        for label in spec.get(section) or []:
+            names = store.match_advertiser_names(conn, label)
+            if not names:
+                unmatched.append((label, advertiser_type))
+                continue
+            for name in names:
+                store.set_advertiser_type(conn, name, label, advertiser_type)
+            matched[label] = (advertiser_type, names)
+    conn.commit()
+
+    if verbose:
+        _print_watchlist_report(conn, matched, unmatched)
+    return {"matched": matched, "unmatched": unmatched}
+
+
+def _print_watchlist_report(conn, matched: dict, unmatched: list) -> None:
+    rows = store.watchlist_summary(conn)
+    by_label: dict = {}
+    for r in rows:
+        by_label.setdefault(r["label"], []).append(r)
+
+    print("=" * 68)
+    order = ["installer", "manufacturer", "platform"]
+    headings = {
+        "installer": "INSTALLERS — competitors; their prices feed the market medians",
+        "manufacturer": "MANUFACTURERS — suppliers; excluded from price medians",
+        "platform": "PLATFORMS — not selling systems; excluded from price medians",
+    }
+    for kind in order:
+        labels = [lbl for lbl, (t, _) in matched.items() if t == kind]
+        if not labels:
+            continue
+        print(f"\n  {headings[kind]}")
+        for label in sorted(labels):
+            for r in by_label.get(label, []):
+                pending = r["ads"] - r["enriched"]
+                print(f"    {label:<18} → {r['page_name'][:34]:<34} "
+                      f"{r['ads']:>5} ads, {pending:>5} pending enrichment")
+
+    if unmatched:
+        print(f"\n  NOT FOUND IN THE ARCHIVE ({len(unmatched)}):")
+        for label, kind in unmatched:
+            note = ("expected — global brands often run no AU ads"
+                    if kind in ("manufacturer", "platform")
+                    else "worth checking — a local competitor should be here")
+            print(f"    {label:<18} ({kind}) — {note}")
+
+    total_ads = sum(r["ads"] for r in rows)
+    pending = sum(r["ads"] - r["enriched"] for r in rows)
+    print(f"\n  {len(rows)} advertiser pages matched, {total_ads} ads, "
+          f"{pending} pending enrichment")
+    print(f"  Next: python run.py --enrich-submit --watchlist")
+    print("=" * 68)
+
+
 def export_csv(conn, out_path: Path) -> int:
     """Flat export of the newest reading per ad, best value first."""
     rows = conn.execute("""
@@ -317,6 +394,11 @@ def main() -> int:
                          "claude-fable-5 (default from config.yaml, else 200)")
     ap.add_argument("--no-enrich", action="store_true",
                     help="skip the LLM extraction step")
+    ap.add_argument("--watchlist-sync", action="store_true",
+                    help="match watchlist.yaml against the archive and classify "
+                         "advertisers, then exit (no API cost)")
+    ap.add_argument("--watchlist", action="store_true",
+                    help="restrict enrichment to watchlist advertisers only")
     ap.add_argument("--sweeps", action="store_true",
                     help="list sweeps and their status, then exit")
     ap.add_argument("--reocr", action="store_true",
@@ -332,6 +414,11 @@ def main() -> int:
     model = enrich_cfg.get("model", enrich.DEFAULT_MODEL)
     audit_model = enrich_cfg.get("audit_model", "claude-fable-5")
     audit_sample = enrich_cfg.get("audit_sample", 200)
+
+    if args.watchlist_sync:
+        sync_watchlist(conn, HERE / "watchlist.yaml")
+        conn.close()
+        return 0
 
     if args.sweeps:
         rows = conn.execute(
@@ -350,13 +437,15 @@ def main() -> int:
 
     # --- enrichment paths ---------------------------------------------------
     if args.enrich_only:
-        n = enrich.enrich_pending(conn, store, model=model)
+        n = enrich.enrich_pending(conn, store, model=model,
+                                  watchlist_only=args.watchlist)
         print(f"[enrich] {n} ads enriched")
         conn.close()
         return 0
 
     if args.enrich_submit:
-        enrich.submit_batch(conn, store, model=model)
+        enrich.submit_batch(conn, store, model=model,
+                            watchlist_only=args.watchlist)
         conn.close()
         return 0
 
@@ -367,7 +456,8 @@ def main() -> int:
 
     if args.enrich_audit is not None:
         n = audit_sample if args.enrich_audit == -1 else args.enrich_audit
-        enrich.run_audit(conn, store, n=n, model=audit_model)
+        enrich.run_audit(conn, store, n=n, model=audit_model,
+                         watchlist_only=args.watchlist)
         conn.close()
         return 0
 

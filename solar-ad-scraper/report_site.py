@@ -299,6 +299,9 @@ def load_market(conn, dim: str = "kw") -> dict:
                COALESCE(page_name, '') AS adv
           FROM ad_market
          WHERE {col} IS NOT NULL AND price IS NOT NULL AND suspect = 0
+           -- Excludes KNOWN non-installers, not "installers only": barely any
+           -- advertisers are classified, so the latter would gut the sample.
+           AND advertiser_type NOT IN ('manufacturer', 'platform')
     """).fetchall()
 
     groups: dict[str, list] = {}
@@ -343,13 +346,16 @@ def load_market(conn, dim: str = "kw") -> dict:
 
     cov = conn.execute("""
         SELECT SUM(CASE WHEN basis != 'unknown' THEN 1 ELSE 0 END) AS known,
-               COUNT(*) AS total, SUM(suspect) AS suspect
+               COUNT(*) AS total, SUM(suspect) AS suspect,
+               SUM(CASE WHEN advertiser_type IN ('manufacturer', 'platform')
+                        THEN 1 ELSE 0 END) AS nonInstaller
           FROM ad_market WHERE price IS NOT NULL
     """).fetchone()
 
     return {"dim": dim, "configs": configs, "positions": positions,
             "coverage": {"known": cov["known"] or 0, "total": cov["total"] or 0,
-                         "suspect": cov["suspect"] or 0},
+                         "suspect": cov["suspect"] or 0,
+                         "nonInstaller": cov["nonInstaller"] or 0},
             "minSample": MIN_SAMPLE}
 
 

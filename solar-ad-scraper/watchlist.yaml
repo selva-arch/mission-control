@@ -1,0 +1,38 @@
+# Competitor watchlist — advertisers worth tracking individually.
+#
+# Seeded from NRG Solar's Instagram "following" list. Add or remove entries
+# freely, then re-run `python run.py --watchlist-sync` to match them against the
+# archive.
+#
+# The `type` matters. Only installers sell an installed system to a homeowner,
+# so only their prices belong in the Market tab's medians. A JinkoSolar global
+# brand ad contains no Australian installed price; letting it into a $/kW median
+# would misstate what a 6.6kW system actually costs. Manufacturers and platforms
+# are still collected, enriched and browsable — they are just kept out of the
+# price statistics.
+#
+# Names are matched loosely (case, spacing and punctuation are ignored, and a
+# name matches if either side contains the other), because these are Instagram
+# handles and the archive stores Facebook Page names. The sync report shows
+# exactly what each entry matched, and names anything that matched nothing.
+
+# Competing installers — they sell systems to the same customers you do.
+installers:
+  - PSC Energy
+  - Solaray Energy
+  - RACV Solar
+
+# Component manufacturers — your suppliers, not your competitors. Their ads are
+# brand marketing, often global, and carry no local installed price.
+manufacturers:
+  - SunPower
+  - JinkoSolar
+  - WINAICO
+  - Clenergy
+
+# Platforms and services — lead generation, monitoring, finance. They advertise
+# heavily in this market but do not sell systems.
+platforms:
+  - SolarQuotes
+  - Solar Analytics
+  - Brighte

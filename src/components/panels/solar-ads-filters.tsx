@@ -24,6 +24,8 @@ export interface Filters {
   status: string
   priced: boolean
   hideSuspect: boolean
+  watchlist: boolean
+  advertiserType: string
   hasFinance: boolean
   hasUrgency: boolean
   priceMin: string
@@ -41,7 +43,8 @@ export interface Filters {
 export const EMPTY_FILTERS: Filters = {
   q: '', state: '', confidence: 'low', category: '', brand: '', advertiser: '',
   offerType: '', basis: '', config: '', status: '', priced: false,
-  hideSuspect: false, hasFinance: false, hasUrgency: false,
+  hideSuspect: false, watchlist: false, advertiserType: '',
+  hasFinance: false, hasUrgency: false,
   priceMin: '', priceMax: '', kwMin: '', kwMax: '', kwhMin: '', kwhMax: '',
   perKwMax: '', perKwhMax: '', startedWithin: '', runningOver: '',
 }
@@ -57,7 +60,7 @@ const CATEGORY_LABELS: Record<string, string> = {
 const SECTIONS = {
   Price: ['priceMin', 'priceMax', 'perKwMax', 'perKwhMax', 'priced'],
   Size: ['kwMin', 'kwMax', 'kwhMin', 'kwhMax', 'config'],
-  Advertiser: ['advertiser', 'brand'],
+  Advertiser: ['advertiser', 'brand', 'watchlist', 'advertiserType'],
   Offer: ['offerType', 'basis', 'hasFinance', 'hasUrgency'],
   Timing: ['startedWithin', 'runningOver', 'status'],
 } as const
@@ -219,6 +222,21 @@ export function SolarAdsFilters({
             <option value="">Any brand</option>
             {brands.map(b => <option key={b} value={b}>{b}</option>)}
           </select>
+          <select value={filters.advertiserType}
+                  onChange={e => set('advertiserType', e.target.value)}
+                  className={select}>
+            <option value="">Any advertiser type</option>
+            <option value="installer">Installers</option>
+            <option value="manufacturer">Manufacturers</option>
+            <option value="platform">Platforms</option>
+            <option value="unknown">Unclassified</option>
+          </select>
+          <label className="flex items-center gap-1.5"
+                 title="Only the competitors listed in watchlist.yaml">
+            <input type="checkbox" checked={filters.watchlist}
+                   onChange={e => set('watchlist', e.target.checked)} />
+            Watchlist only
+          </label>
           {!brands.length && (
             <span className="text-xs text-muted-foreground">
               Brands appear once the AI enrichment pass has run.

@@ -50,6 +50,7 @@ export async function GET(request: NextRequest) {
       ['offerType', 'm.offer_type'],
       ['advertiser', 'a.page_name'],
       ['basis', 'm.basis'],
+      ['advertiserType', 'm.advertiser_type'],
       ['config', 'COALESCE(m.config_kw, m.config_kwh)'],
     ]
     for (const [param, col] of eq) {
@@ -77,6 +78,7 @@ export async function GET(request: NextRequest) {
     if (status === 'active') where.push(`m.is_active = 1`)
     if (status === 'ended') where.push(`m.is_active = 0`)
 
+    if (sp.get('watchlist') === '1') where.push(`m.on_watchlist = 1`)
     if (sp.get('priced') === '1') where.push(`m.price IS NOT NULL`)
     if (sp.get('hideSuspect') === '1') where.push(`m.suspect = 0`)
     if (sp.get('hasFinance') === '1') where.push(`COALESCE(m.finance_terms, '') != ''`)
@@ -127,6 +129,7 @@ export async function GET(request: NextRequest) {
              m.price_source, m.basis AS price_basis, m.suspect,
              m.is_active, m.collation_count, m.days_running,
              m.category AS product_category, m.brand, m.offer_type,
+             m.advertiser_type, m.on_watchlist,
              m.finance_terms, m.urgency_tactics,
              COALESCE(m.config_kw, m.config_kwh) AS config,
              CASE WHEN m.suspect = 1 THEN 'check-parse' ELSE '' END AS flag,

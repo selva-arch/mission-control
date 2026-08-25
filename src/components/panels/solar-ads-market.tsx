@@ -42,7 +42,7 @@ interface MarketData {
   dim?: 'kw' | 'kwh'
   configs?: Config[]
   positions?: Position[]
-  coverage?: { known: number; total: number; suspect: number }
+  coverage?: { known: number; total: number; suspect: number; nonInstaller: number }
   minSample?: number
 }
 
@@ -167,6 +167,10 @@ export function SolarAdsMarket({ state, category }: { state?: string; category?:
           &ldquo;not stated&rdquo; and cannot be compared against the other two.
           {cov.suspect > 0 && <> {cov.suspect.toLocaleString()} ads with implausible
           price parses are excluded from every figure here.</>}
+          {cov.nonInstaller > 0 && <> {cov.nonInstaller.toLocaleString()} ads from
+          manufacturers and platforms are also excluded &mdash; they advertise
+          brands and services, not installed systems, so their prices are not
+          what a customer pays.</>}
         </p>
       )}
 

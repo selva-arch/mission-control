@@ -217,6 +217,20 @@ CREATE TABLE IF NOT EXISTS enrich_audits (
     UNIQUE (ad_archive_id, audit_version)
 );
 
+-- Advertiser classification, populated by `run.py --watchlist-sync` from
+-- watchlist.yaml.
+--
+-- page_name holds the EXACT string as stored on ads, not the loose name typed
+-- into the yaml. The fuzzy matching happens once in Python, where it can be
+-- reported and reviewed; every join after that is a fast exact equality.
+CREATE TABLE IF NOT EXISTS advertiser_types (
+    page_name       TEXT PRIMARY KEY,
+    label           TEXT,               -- the watchlist.yaml entry that matched
+    advertiser_type TEXT NOT NULL,      -- installer | manufacturer | platform
+    on_watchlist    INTEGER NOT NULL DEFAULT 1,
+    synced_at       INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
 -- ---------------------------------------------------------------------------
 -- ad_market: the single definition of "what does this ad actually offer".
 --
@@ -275,11 +289,17 @@ resolved AS (
              THEN 1 ELSE 0 END AS suspect,
         s.is_active,
         s.days_running,
-        s.collation_count
+        s.collation_count,
+        -- Unclassified advertisers are 'unknown', NOT excluded. Only ~10 of 700+
+        -- are typed, so treating unclassified as non-installer would collapse
+        -- the market to a handful of advertisers.
+        COALESCE(t.advertiser_type, 'unknown') AS advertiser_type,
+        COALESCE(t.on_watchlist, 0)            AS on_watchlist
       FROM ads a
       LEFT JOIN latest_price p ON p.ad_archive_id = a.ad_archive_id
       LEFT JOIN latest_offer o ON o.ad_archive_id = a.ad_archive_id
       LEFT JOIN latest_snap  s ON s.ad_archive_id = a.ad_archive_id
+      LEFT JOIN advertiser_types t ON t.page_name = a.page_name
 )
 SELECT
     r.*,

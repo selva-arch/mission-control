@@ -224,7 +224,8 @@ def _open_batch(conn, store):
 
 
 def submit_batch(conn, store, model: str = DEFAULT_MODEL,
-                 limit: int | None = None, verbose: bool = True):
+                 limit: int | None = None, verbose: bool = True,
+                 watchlist_only: bool = False):
     """Submit every pending ad as one Message Batch. Returns the batch id.
 
     Refuses to run while a previous batch is still open, so the same ads
@@ -237,10 +238,12 @@ def submit_batch(conn, store, model: str = DEFAULT_MODEL,
                   f"({open_batch['status']}) — run --enrich-fetch first")
         return None
 
-    rows = store.ads_needing_enrichment(conn, ENRICH_VERSION, limit)
+    rows = store.ads_needing_enrichment(conn, ENRICH_VERSION, limit,
+                                       watchlist_only=watchlist_only)
     if not rows:
         if verbose:
-            print("[enrich] nothing pending")
+            scope = " on the watchlist" if watchlist_only else ""
+            print(f"[enrich] nothing pending{scope}")
         return None
     if not available():
         try:
@@ -270,8 +273,9 @@ def submit_batch(conn, store, model: str = DEFAULT_MODEL,
                               model=model)
 
     if verbose:
+        scope = " (watchlist only)" if watchlist_only else ""
         print(f"[enrich] submitted batch {batch.id}: {len(requests)} requests "
-              f"covering {len(rows)} ads on {model}")
+              f"covering {len(rows)} ads on {model}{scope}")
         print(f"  Most batches finish within an hour, up to 24h. Check with "
               f"`python run.py --enrich-fetch`.")
     return batch.id
@@ -384,7 +388,7 @@ AUDIT_RESPONSE_SCHEMA = {
 }
 
 
-def sample_for_audit(conn, n: int = 200) -> list:
+def sample_for_audit(conn, n: int = 200, watchlist_only: bool = False) -> list:
     """Stratified sample of enriched ads to check.
 
     Weighted toward ads with a detected price — that is what the Market tab
@@ -394,7 +398,7 @@ def sample_for_audit(conn, n: int = 200) -> list:
     """
     import random
 
-    pool = conn.execute("""
+    sql = """
         SELECT m.ad_archive_id, a.page_name, a.title, a.body_text, a.caption,
                a.link_description, a.cta_text, a.ocr_text, a.is_dynamic,
                m.price, m.basis, m.category
@@ -402,7 +406,10 @@ def sample_for_audit(conn, n: int = 200) -> list:
          WHERE EXISTS (SELECT 1 FROM ad_offers o
                         WHERE o.ad_archive_id = m.ad_archive_id
                           AND o.enrich_version = ?)
-    """, (ENRICH_VERSION,)).fetchall()
+    """
+    if watchlist_only:
+        sql += " AND m.on_watchlist = 1"
+    pool = conn.execute(sql, (ENRICH_VERSION,)).fetchall()
     pool_by_id = {r["ad_archive_id"]: r for r in pool}
     if len(pool_by_id) <= n:
         return list(pool_by_id.values())
@@ -502,13 +509,13 @@ def audit_batch(rows: list, extractions: dict, model: str = AUDIT_MODEL) -> list
 
 
 def run_audit(conn, store, n: int = 200, model: str = AUDIT_MODEL,
-             verbose: bool = True) -> dict:
+             verbose: bool = True, watchlist_only: bool = False) -> dict:
     """Sample enriched ads, adversarially verify them, and report a summary.
 
     Returns the aggregate report dict; also printed. Does not modify v1
     extractions — verdicts land in enrich_audits under AUDIT_VERSION.
     """
-    sample = sample_for_audit(conn, n)
+    sample = sample_for_audit(conn, n, watchlist_only=watchlist_only)
     if not sample:
         if verbose:
             print("[audit] no enriched ads to check yet — run enrichment first")
@@ -624,16 +631,19 @@ def _print_audit_report(conn, checked: int, field_wrong: dict, field_total: dict
 
 
 def enrich_pending(conn, store, model: str = DEFAULT_MODEL,
-                   limit: int | None = None, verbose: bool = True) -> int:
+                   limit: int | None = None, verbose: bool = True,
+                   watchlist_only: bool = False) -> int:
     """Enrich every ad lacking an extraction at the current version.
 
     Returns the number of ads enriched. Safe to interrupt and re-run — work
     already committed is never repeated.
     """
-    rows = store.ads_needing_enrichment(conn, ENRICH_VERSION, limit)
+    rows = store.ads_needing_enrichment(conn, ENRICH_VERSION, limit,
+                                       watchlist_only=watchlist_only)
     if not rows:
         if verbose:
-            print("[enrich] nothing pending")
+            scope = " on the watchlist" if watchlist_only else ""
+            print(f"[enrich] nothing pending{scope}")
         return 0
     if not available():
         # Report the actual cause: telling someone to install a package they

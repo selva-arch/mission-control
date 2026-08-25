@@ -134,6 +134,12 @@ export async function GET(request: NextRequest) {
         SELECT DISTINCT offer_type AS name FROM ad_market
          WHERE COALESCE(offer_type, '') != '' ORDER BY name
       `).map(r => r.name),
+      watchlist: query<{ page_name: string; label: string; advertiser_type: string; ads: number }>(`
+        SELECT t.page_name, t.label, t.advertiser_type,
+               (SELECT COUNT(*) FROM ads a WHERE a.page_name = t.page_name) AS ads
+          FROM advertiser_types t WHERE t.on_watchlist = 1
+         ORDER BY t.advertiser_type, t.label
+      `),
     }
 
     return NextResponse.json({

@@ -66,6 +66,12 @@ export async function GET(request: NextRequest) {
       `m.${configCol} IS NOT NULL`,
       `m.price IS NOT NULL`,
       `m.suspect = 0`, // a flagged parse must never enter a market statistic
+      // Manufacturers and platforms do not sell installed systems: a panel
+      // maker's brand ad or a lead-gen site's teaser price is not what a
+      // homeowner pays. Note this EXCLUDES known non-installers rather than
+      // including only known installers — only a handful of advertisers are
+      // classified, so the latter would collapse the market to those few.
+      `m.advertiser_type NOT IN ('manufacturer', 'platform')`,
     ]
     const params: unknown[] = []
 
@@ -156,16 +162,20 @@ export async function GET(request: NextRequest) {
         })
     })
 
-    const coverage = queryOne<{ known: number; total: number; suspect: number }>(`
+    const coverage = queryOne<{
+      known: number; total: number; suspect: number; nonInstaller: number
+    }>(`
       SELECT SUM(CASE WHEN basis != 'unknown' THEN 1 ELSE 0 END) AS known,
              COUNT(*) AS total,
-             SUM(suspect) AS suspect
+             SUM(suspect) AS suspect,
+             SUM(CASE WHEN advertiser_type IN ('manufacturer', 'platform')
+                      THEN 1 ELSE 0 END) AS nonInstaller
         FROM ad_market WHERE price IS NOT NULL
     `)
 
     return NextResponse.json({
       archiveReady: true, dim, configs, positions,
-      coverage: coverage ?? { known: 0, total: 0, suspect: 0 },
+      coverage: coverage ?? { known: 0, total: 0, suspect: 0, nonInstaller: 0 },
       minSample: MIN_SAMPLE,
     })
   } catch (error) {

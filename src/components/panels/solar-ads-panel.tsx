@@ -56,6 +56,8 @@ interface Ad {
   brand: string | null
   offer_type: string | null
   config: string | null
+  advertiser_type: string | null
+  on_watchlist: number | null
   price_source: string | null
   price_basis: string | null
   creative_sha: string | null
@@ -461,6 +463,23 @@ python run.py             # full sweep (hours, resumable)`}
                           {s}
                         </span>
                       ))}
+                    {ad.advertiser_type && ad.advertiser_type !== 'unknown' && (
+                      // Visually distinct from product tags: a panel maker's
+                      // brand ad carries no installed price and must not be
+                      // read as a competitor's offer.
+                      <span
+                        className={`px-1.5 py-0.5 rounded ${
+                          ad.advertiser_type === 'installer'
+                            ? 'bg-emerald-500/15 text-emerald-300'
+                            : 'bg-violet-500/15 text-violet-300'
+                        }`}
+                        title={ad.advertiser_type === 'installer'
+                          ? 'Competitor — prices feed the market medians'
+                          : 'Not an installer — excluded from price medians'}
+                      >
+                        {ad.advertiser_type}
+                      </span>
+                    )}
                     {ad.product_category && (
                       <span className="px-1.5 py-0.5 rounded bg-muted">
                         {CATEGORY_LABELS[ad.product_category] || ad.product_category}

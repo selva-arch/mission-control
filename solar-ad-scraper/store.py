@@ -360,6 +360,104 @@ def record_offer(conn, ad_archive_id: str, enrich_version: str, model: str,
     )
 
 
+# ---------------------------------------------------------------------------
+# Competitor watchlist
+# ---------------------------------------------------------------------------
+
+def normalise_name(name: str) -> str:
+    """Reduce an advertiser name to a comparable key, ignoring separators.
+
+    Watchlist entries come from Instagram handles ("solarayenergy") while the
+    archive stores Facebook Page names ("Solaray Energy"), so spacing and
+    punctuation have to go before comparing.
+    """
+    return "".join(ch for ch in (name or "").lower() if ch.isalnum())
+
+
+def _tokens(name: str) -> list[str]:
+    """Lowercase alphanumeric words, preserving word boundaries."""
+    out, cur = [], []
+    for ch in (name or "").lower():
+        if ch.isalnum():
+            cur.append(ch)
+        elif cur:
+            out.append("".join(cur))
+            cur = []
+    if cur:
+        out.append("".join(cur))
+    return out
+
+
+def _is_sublist(needle: list[str], haystack: list[str]) -> bool:
+    if not needle or len(needle) > len(haystack):
+        return False
+    return any(haystack[i:i + len(needle)] == needle
+               for i in range(len(haystack) - len(needle) + 1))
+
+
+def names_match(label: str, candidate: str) -> bool:
+    """Whether `candidate` (a stored page_name) refers to `label`.
+
+    Two ways to match, deliberately both narrow:
+
+    1. Identical once separators are stripped — so the handle "solarayenergy"
+       finds the Page "Solaray Energy".
+    2. One name's whole words appear consecutively in the other — so "JinkoSolar"
+       finds "JinkoSolar Australia".
+
+    Plain substring matching is NOT enough: "Brighte" is a substring of
+    "Brighter Solar Solutions" but a different company. Requiring whole-word
+    alignment is what keeps a short brand name from swallowing longer unrelated
+    ones.
+    """
+    a, b = normalise_name(label), normalise_name(candidate)
+    if len(a) < 4 or len(b) < 4:
+        return False
+    if a == b:
+        return True
+    ta, tb = _tokens(label), _tokens(candidate)
+    return _is_sublist(ta, tb) or _is_sublist(tb, ta)
+
+
+def match_advertiser_names(conn, label: str) -> list[str]:
+    """Every page_name in the archive that refers to `label`."""
+    rows = conn.execute(
+        "SELECT DISTINCT page_name FROM ads WHERE COALESCE(page_name, '') != ''"
+    ).fetchall()
+    return sorted(r["page_name"] for r in rows
+                  if names_match(label, r["page_name"]))
+
+
+def set_advertiser_type(conn, page_name: str, label: str, advertiser_type: str,
+                        on_watchlist: bool = True) -> None:
+    conn.execute(
+        "INSERT INTO advertiser_types (page_name, label, advertiser_type, "
+        " on_watchlist, synced_at) VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(page_name) DO UPDATE SET "
+        "  label = excluded.label, advertiser_type = excluded.advertiser_type, "
+        "  on_watchlist = excluded.on_watchlist, synced_at = excluded.synced_at",
+        (page_name, label, advertiser_type, int(bool(on_watchlist)),
+         int(time.time())),
+    )
+
+
+def clear_watchlist(conn) -> None:
+    """Drop previous classifications so a removed yaml entry actually leaves."""
+    conn.execute("DELETE FROM advertiser_types")
+
+
+def watchlist_summary(conn) -> list[sqlite3.Row]:
+    return conn.execute("""
+        SELECT t.label, t.advertiser_type, t.page_name,
+               (SELECT COUNT(*) FROM ads a WHERE a.page_name = t.page_name) AS ads,
+               (SELECT COUNT(*) FROM ads a
+                 JOIN ad_offers o ON o.ad_archive_id = a.ad_archive_id
+                WHERE a.page_name = t.page_name) AS enriched
+          FROM advertiser_types t
+         ORDER BY t.advertiser_type, t.label, ads DESC
+    """).fetchall()
+
+
 def record_enrich_batch(conn, batch_id: str, request_count: int,
                         status: str, model: str = "") -> None:
     conn.execute(
@@ -401,7 +499,8 @@ def record_audit(conn, ad_archive_id: str, audit_version: str, model: str,
     )
 
 
-def ads_needing_enrichment(conn, enrich_version: str, limit: int | None = None) -> list[sqlite3.Row]:
+def ads_needing_enrichment(conn, enrich_version: str, limit: int | None = None,
+                           watchlist_only: bool = False) -> list[sqlite3.Row]:
     sql = (
         "SELECT a.ad_archive_id, a.page_name, a.title, a.body_text, a.caption, "
         "       a.link_description, a.cta_text, a.ocr_text "
@@ -410,6 +509,11 @@ def ads_needing_enrichment(conn, enrich_version: str, limit: int | None = None) 
         "WHERE o.id IS NULL"
     )
     args: list = [enrich_version]
+    if watchlist_only:
+        # Targeted enrichment: a handful of named competitors rather than the
+        # whole archive.
+        sql += (" AND a.page_name IN (SELECT page_name FROM advertiser_types "
+                "                      WHERE on_watchlist = 1)")
     if limit:
         sql += " LIMIT ?"
         args.append(limit)
